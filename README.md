@@ -25,9 +25,9 @@ This repository contains code for running repeatable experiments with a tool for
 
     
     .
-    ├── results				   # Results of experiments
+    ├── results                # Results of experiments
     |
-    ├── src 				   # source code for the project
+    ├── src                    # source code for the project
     |
     ├── writeups               # Project proposal and drafts
     |
