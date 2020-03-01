@@ -30,7 +30,6 @@ This repository contains code for running repeatable experiments with a tool for
     ├── src 				   # source code for the project
     |
     ├── writeups               # Project proposal and drafts
-  	|
     |
     ├── LICENSE
     └── README.md
