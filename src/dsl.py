@@ -3,29 +3,29 @@ This file defines the DSL for this project
 
 - Concat (e1, e2, e3, ...) = Concat ( [e1] , [e2], [e3], ...)
 
-	- ConstStr (c) = c
+    - ConstStr (c) = c
 
-	- Substr (k1, k2) = v[p1...p2] where p is k if k > 0, else len(v) + p
+    - Substr (k1, k2) = v[p1...p2] where p is k if k > 0, else len(v) + p
 
-	- GetSpan(r1, i1, y1, r2, i2, y2) = starting at i1th match of r1, y1 says start or end, end at i2th match of r2, y2 ""
+    - GetSpan(r1, i1, y1, r2, i2, y2) = starting at i1th match of r1, y1 says start or end, end at i2th match of r2, y2 ""
 
-	- _Nested Expressions_ [n1(n2)] = [n1]_v1_ where v1 = [n2]
+    - _Nested Expressions_ [n1(n2)] = [n1]_v1_ where v1 = [n2]
 
-	- GetToken(t, i) = ith match of t from beginning (end if i < 0)
+    - GetToken(t, i) = ith match of t from beginning (end if i < 0)
 
-	- GetUpto(r) = v[0...i] where i is the index at end of match of r
+    - GetUpto(r) = v[0...i] where i is the index at end of match of r
 
-	- GetFrom(r) = v[j...len(v)] where j is end of last match of r 
+    - GetFrom(r) = v[j...len(v)] where j is end of last match of r 
 
-	- GetFirst(t, i) = Concat first i matches of t
+    - GetFirst(t, i) = Concat first i matches of t
 
-	- GetAll(t) = Concat all matches of t
+    - GetAll(t) = Concat all matches of t
 
-	- ToCase(s) = upper or lower
+    - ToCase(s) = upper or lower
 
-	- Trim() = removes whitespace from around the string
+    - Trim() = removes whitespace from around the string
 
-	- Replace(delta1, delta2) = replaces regex delta1 with delta2
+    - Replace(delta1, delta2) = replaces regex delta1 with delta2
 
 -- See https://github.com/yeoedward/Robust-Fill/blob/f8bbf7546732bc7e8412b53f0267e7c8b82e135e/operators.py
 '''
@@ -40,20 +40,20 @@ class DSL(ABC):
 
     @abstractmethod
     def eval(self, value):
-    	'''
-    	Defines the semantics of how to evaluate value
-    	'''
+        '''
+        Defines the semantics of how to evaluate value
+        '''
         raise NotImplementedError
 
-	@abstractmethod
+    @abstractmethod
     def __repr__(self):
         raise NotImplementedError
 
     @abstractmethod
     def to_tokens(self, op_token_table):
-    	'''
-    	Convert DSL to token version from a table
-    	'''
+        '''
+        Convert DSL to token version from a table
+        '''
         raise NotImplementedError
 
 class Program(DSL):
@@ -451,3 +451,78 @@ def op_to_string(name, raw_args, indent, recursive=False):
         name=name,
         args_str=args_str,
     )
+
+
+#########################################
+########### OP TOKEN TABLES  ############ 
+#########################################
+
+# Special token for end-of-sequence
+EOS = 'EOS'
+TokenTables = namedtuple(
+    'TokenTables',
+    ['token_op_table', 'op_token_table', 'string_token_table'],
+)
+
+
+def tokenize_string(string, string_token_table):
+    return [string_token_table[char] for char in string]
+
+
+def build_token_tables():
+    token_op_table = [EOS, Concat, Compose, ConstStr, SubStr,
+            GetSpan, Trim]
+
+    # Nesting operators and their args get "compacted" into "primitive" tokens
+    for type_ in Type:
+        for index in INDEX:
+            token_op_table.append((GetToken, type_, index))
+
+    for case in CASE:
+        token_op_table.append((ToCase, case))
+
+    for delim1 in DELIMITER:
+        for delim2 in DELIMITER:
+            token_op_table.append((Replace, delim1, delim2))
+
+    for dsl_regex in list(Type) + list(DELIMITER):
+        token_op_table.append((GetUpto, dsl_regex))
+
+    for dsl_regex in list(Type) + list(DELIMITER):
+        token_op_table.append((GetFrom, dsl_regex))
+
+    for type_ in Type:
+        for index in INDEX:
+            token_op_table.append((GetFirst, type_, index))
+
+    for type_ in Type:
+        token_op_table.append((GetAll, type_))
+
+    # Primitive types
+    for type_ in Type:
+        token_op_table.append(type_)
+
+    for case in op.CASE:
+        token_op_table.append(case)
+
+    for boundary in BOUNDARY:
+        token_op_table.append(boundary)
+
+    # Covers index too
+    for position in POSITION:
+        token_op_table.append(position)
+
+    # This covers DELIMITER
+    for character in CHARACTER:
+        token_op_table.append(character)
+
+    token_op_table = {token: op for token, op in enumerate(token_op_table)}
+
+    op_token_table = {op: token for token, op in token_op_table.items()}
+
+    assert len(token_op_table) == len(op_token_table)
+
+    string_token_table = {char: token for token, char in enumerate(CHARACTER)}
+
+    return TokenTables(token_op_table=token_op_table, op_token_table=op_token_table,
+            string_token_table=string_token_table)
