@@ -4,7 +4,7 @@
 
 _A research project investigating applications of Actor Critic in Neural Program Synthesis_
 
-[Proposal](./writeups/project_proposal_final.pdf)
+[Proposal](./writeups/project_proposal_final_program_synthesis.pdf)
 
 ---
 
