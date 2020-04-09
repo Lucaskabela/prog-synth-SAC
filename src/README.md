@@ -6,8 +6,6 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
 
 - Implement MDP formulation (environment)
-    
-    - Observations: random I/O generation, and random program sampling 
 
     - action: program from agent
 
