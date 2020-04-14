@@ -5,13 +5,6 @@ This file contains the code for this project, including the DSL, interpreter, mo
 ### TODO LIST
 
 
-- Implement MDP formulation (environment)
-
-    - action: program from agent
-
-    - reward function : binary 0 or 1 (matches or not)
-
-
 - Implement the models
     
     - Base model from Robsutfill / Reinforce

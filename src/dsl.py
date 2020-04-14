@@ -30,6 +30,7 @@ This file defines the DSL for this project
 -- See https://github.com/yeoedward/Robust-Fill/blob/f8bbf7546732bc7e8412b53f0267e7c8b82e135e/operators.py
 '''
 from abc import ABC, abstractmethod
+from collections import namedtuple
 from enum import Enum
 from string import printable, whitespace
 
@@ -124,8 +125,8 @@ class Concat(Program):
     def to_tokens(self, op_token_table):
         sub_tkns = [e.to_tokens(op_token_table) for e in self.expressions]
         return reduce(
-                lambda a, b: a + [op_token_table[self.__class__]] + b, sub_tkns)
-                + [op_token_table['EOS']]
+                lambda a, b: a + [op_token_table[self.__class__]] + b, 
+                sub_tkns) + [op_token_table['EOS']]
 
 
 class Compose(Nesting):
@@ -275,7 +276,7 @@ class ToCase(Nesting):
             return in_str.upper()
         elif self.case == CASE.LOWER:
             return in_str.lower()
-        else
+        else:
             raise ValueError('Invalid case: {}'.format(self.case))
 
     def to_string(self, indent, tab):

@@ -11,7 +11,7 @@ import dsl as op
 
 
 LOGGER = logging.getLogger(__name__)
-LOGGER.setLevel(DEBUG)
+LOGGER.setLevel(logging.DEBUG)
 
 Example = namedtuple(
     'Example',
