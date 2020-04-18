@@ -177,7 +177,7 @@ def train_full():
     def sample():
         return sample_full(
             token_tables,
-            batch_size=32,
+            batch_size=1,
             max_expressions=3,
             max_characters=50,
         )
