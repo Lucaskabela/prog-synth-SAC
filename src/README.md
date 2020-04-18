@@ -7,9 +7,11 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
 - Implement the models
     
-    - Base model from Robsutfill / Reinforce
+    - Convert tokens to ops (get program with beam approach)
+    
+    - Implement Reinforce
 
-    - AC model (LSTM and GRU approach)
+    - AC model
 
     - SAC model
 
