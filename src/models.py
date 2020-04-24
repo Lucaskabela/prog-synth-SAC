@@ -7,66 +7,49 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class RobustFill(nn.Module):
-    def __init__(
-            self,
-            string_size,
-            string_embedding_size,
-            hidden_size,
-            program_size):
+    def __init__( self, string_size, string_embedding_size, hidden_size, program_size, device='cpu'):
         super().__init__()
+
+        # set the device of this robustfill model, default to cpu
+        self.device = device
+
+        # converts character_ngrams to string embeddings
         self.embedding = nn.Embedding(string_size, string_embedding_size)
-        # TODO: Create static factory methods for different configurations
-        # e.g. Basic seq-to-seq vs attention A vs attention B...
-        self.input_encoder = AttentionLSTM.lstm(
-            input_size=string_embedding_size,
-            hidden_size=hidden_size,
-        )
+
+        # input encoder uses lstm to embed input
+        self.input_encoder = AttentionLSTM.lstm(input_size=string_embedding_size, hidden_size=hidden_size)
+
+        # output decoder with attention, default to single attention architecture
         self.output_encoder = AttentionLSTM.single_attention(
             input_size=string_embedding_size,
             hidden_size=hidden_size,
         )
-        self.program_decoder = ProgramDecoder(
-            hidden_size=hidden_size,
-            program_size=program_size,
-        )
-        self.device = 'cpu'
+
+        self.program_decoder = ProgramDecoder(hidden_size=hidden_size, program_size=program_size)
 
     def set_device(self, device):
         self.device = device
     
+    # ensures all programs in batch have same number examples
     @staticmethod
     def _check_num_examples(batch):
         assert len(batch) > 0
         num_examples = len(batch[0])
-        assert all([
-            len(examples) == num_examples
-            for examples in batch
-        ])
+        assert all([len(examples) == num_examples for examples in batch])
         return num_examples
 
+    # seperates i/o into two different list
     @staticmethod
     def _split_flatten_examples(batch):
-        input_batch = [
-            input_sequence
-            for examples in batch
-            for input_sequence, _ in examples
-        ]
-        output_batch = [
-            output_sequence
-            for examples in batch
-            for _, output_sequence in examples
-        ]
+        input_batch = [input_sequence for examples in batch for input_sequence, _ in examples]
+        output_batch = [output_sequence for examples in batch for _, output_sequence in examples]
         return input_batch, output_batch
 
     def _embed_batch(self, batch):
-        return [
-            self.embedding(torch.LongTensor(sequence).to(self.device))
-            for sequence in batch
-        ]
+        return [self.embedding(torch.LongTensor(sequence).to(self.device)) for sequence in batch]
 
     # Expects:
-    # list (batch_size) of tuples (input, output) of list (sequence_length)
-    # of token indices
+    # list (batch_size) of tuples (input, output) of list (sequence_length) of token indices
     def forward(self, batch, max_program_length):
         num_examples = RobustFill._check_num_examples(batch)
         input_batch, output_batch = RobustFill._split_flatten_examples(batch)
@@ -75,50 +58,25 @@ class RobustFill(nn.Module):
         output_batch = self._embed_batch(output_batch)
 
         input_all_hidden, hidden = self.input_encoder(input_batch)
-        output_all_hidden, hidden = self.output_encoder(
-            output_batch,
-            hidden=hidden,
-            attended=input_all_hidden,
-        )
-        return self.program_decoder(
-            hidden=hidden,
-            output_all_hidden=output_all_hidden,
-            num_examples=num_examples,
-            max_program_length=max_program_length,
-        )
+        output_all_hidden, hidden = self.output_encoder(output_batch, hidden=hidden, attended=input_all_hidden)
+        return self.program_decoder(hidden=hidden, output_all_hidden=output_all_hidden, num_examples=num_examples, max_program_length=max_program_length)
 
 
 class ProgramDecoder(nn.Module):
     def __init__(self, hidden_size, program_size):
         super().__init__()
         self.program_size = program_size
-        self.program_lstm = AttentionLSTM.single_attention(
-            input_size=program_size,
-            hidden_size=hidden_size,
-        )
+        self.program_lstm = AttentionLSTM.single_attention(input_size=program_size, hidden_size=hidden_size)
         self.max_pool_linear = nn.Linear(hidden_size, hidden_size)
         self.softmax_linear = nn.Linear(hidden_size, program_size)
 
-    def forward(
-            self,
-            hidden,
-            output_all_hidden,
-            num_examples,
-            max_program_length):
+    def forward(self, hidden, output_all_hidden, num_examples, max_program_length):
         program_sequence = []
-        decoder_input = [
-            torch.zeros(1, self.program_size)
-            for _ in range(hidden[0].size()[1])
-        ]
+        decoder_input = [torch.zeros(1, self.program_size) for _ in range(hidden[0].size()[1])]
         for _ in range(max_program_length):
-            _, hidden = self.program_lstm(
-                decoder_input,
-                hidden=hidden,
-                attended=output_all_hidden,
-            )
+            _, hidden = self.program_lstm(decoder_input, hidden=hidden, attended=output_all_hidden)
             hidden_size = hidden[0].size()[2]
-            unpooled = (
-                torch.tanh(self.max_pool_linear(hidden[0][-1, :, :]))
+            unpooled = (torch.tanh(self.max_pool_linear(hidden[0][-1, :, :]))
                 .view(-1, num_examples, hidden_size)
                 .permute(0, 2, 1)
             )
@@ -126,24 +84,8 @@ class ProgramDecoder(nn.Module):
             program_embedding = self.softmax_linear(pooled)
 
             program_sequence.append(program_embedding.unsqueeze(0))
-            decoder_input = [
-                F.softmax(p, dim=1)
-                for p in program_embedding.split(1)
-                for _ in range(num_examples)
-            ]
-
+            decoder_input = [F.softmax(p, dim=1) for p in program_embedding.split(1) for _ in range(num_examples)]
         return torch.cat(program_sequence)
-
-    def extract_program(
-            self,
-            hidden,
-            output_all_hidden,
-            num_examples,
-            max_program_length):
-
-        res = self.forward(hidden, output_all_hidden, num_examples, max_program_length)
-        return torch.argmax(res, dim=-1)
-
 
 
 class LuongAttention(nn.Module):
@@ -156,13 +98,7 @@ class LuongAttention(nn.Module):
 
     @staticmethod
     def _masked_softmax(vectors, sequence_lengths):
-        pad(
-            vectors,
-            sequence_lengths,
-            float('-inf'),
-            batch_dim=0,
-            sequence_dim=1,
-        )
+        pad(vectors, sequence_lengths, float('-inf'), batch_dim=0, sequence_dim=1)
         return F.softmax(vectors, dim=1)
 
     # attended: (other sequence length x batch size x query size)
@@ -186,10 +122,7 @@ class LuongAttention(nn.Module):
             sequence_lengths,
         )
         # (batch_size x query size)
-        context = (
-            align.unsqueeze(1).bmm(attended.transpose(1, 0))
-            .squeeze(1)
-        )
+        context = (align.unsqueeze(1).bmm(attended.transpose(1, 0)).squeeze(1))
         return context
 
 
@@ -220,16 +153,9 @@ class SingleAttention(nn.Module):
 
     def forward(self, input_, hidden, attended_args):
         attended, sequence_lengths = attended_args
-        context = self.attention(
-            hidden[0].squeeze(0),
-            attended,
-            sequence_lengths,
-        )
+        context = self.attention(hidden[0].squeeze(0), attended, sequence_lengths)
         input_ = input_.to(context.device)
-        _, hidden = self.lstm(
-            torch.cat((input_, context), 1).unsqueeze(0),
-            hidden,
-        )
+        _, hidden = self.lstm(torch.cat((input_, context), 1).unsqueeze(0), hidden)
         return hidden
 
 
@@ -261,17 +187,11 @@ class AttentionLSTM(nn.Module):
         if hidden is None:
             return None, None
 
-        sorted_hidden = (
-            hidden[0][:, sorted_indices, :],
-            hidden[1][:, sorted_indices, :],
-        )
+        sorted_hidden = (hidden[0][:, sorted_indices, :], hidden[1][:, sorted_indices, :])
 
         sorted_attended = None
         if attended is not None:
-            sorted_attended = (
-                attended[0][:, sorted_indices, :],
-                attended[1][sorted_indices],
-            )
+            sorted_attended = (attended[0][:, sorted_indices, :], attended[1][sorted_indices])
 
         return sorted_hidden, sorted_attended
 
@@ -343,24 +263,12 @@ class AttentionLSTM(nn.Module):
             )
 
         packed, sorted_indices = AttentionLSTM._pack(sequence_batch)
-        sorted_hidden, sorted_attended = AttentionLSTM._sort(
-            hidden,
-            attended,
-            sorted_indices,
+        sorted_hidden, sorted_attended = AttentionLSTM._sort(hidden, attended, sorted_indices)
+        all_hidden, final_hidden = self._unroll(packed, sorted_hidden, sorted_attended)
+        unsorted_all_hidden, unsorted_final_hidden = AttentionLSTM._unsort(all_hidden=all_hidden,
+            final_hidden=final_hidden, sorted_indices=sorted_indices,
         )
-        all_hidden, final_hidden = self._unroll(
-            packed,
-            sorted_hidden,
-            sorted_attended,
-        )
-        unsorted_all_hidden, unsorted_final_hidden = AttentionLSTM._unsort(
-            all_hidden=all_hidden,
-            final_hidden=final_hidden,
-            sorted_indices=sorted_indices,
-        )
-        sequence_lengths = torch.LongTensor([
-            s.shape[0] for s in sequence_batch
-        ])
+        sequence_lengths = torch.LongTensor([s.shape[0] for s in sequence_batch])
         return (unsorted_all_hidden, sequence_lengths), unsorted_final_hidden
 
 
@@ -370,21 +278,12 @@ def expand_vector(vector, dim, num_dims):
             vector.dim(),
         ))
 
-    return vector.view(*[
-        vector.size()[0] if d == dim else 1
-        for d in range(num_dims)
-    ])
+    return vector.view(*[vector.size()[0] if d == dim else 1 for d in range(num_dims)])
 
 
 def pad(tensor, sequence_lengths, value, batch_dim, sequence_dim):
     max_length = tensor.size()[sequence_dim]
-    indices = expand_vector(
-        torch.arange(max_length),
-        sequence_dim,
-        tensor.dim(),
-    )
+    indices = expand_vector(torch.arange(max_length), sequence_dim, tensor.dim())
     mask = indices >= expand_vector(sequence_lengths, batch_dim, tensor.dim())
     mask = mask.to(tensor.device)
     tensor.masked_fill_(mask, value)
-
-## Should include REINFORCE, MCTS, AC, and SAC
