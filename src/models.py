@@ -29,7 +29,11 @@ class RobustFill(nn.Module):
             hidden_size=hidden_size,
             program_size=program_size,
         )
+        self.device = 'cpu'
 
+    def set_device(self, device):
+        self.device = device
+    
     @staticmethod
     def _check_num_examples(batch):
         assert len(batch) > 0
@@ -56,7 +60,7 @@ class RobustFill(nn.Module):
 
     def _embed_batch(self, batch):
         return [
-            self.embedding(torch.LongTensor(sequence))
+            self.embedding(torch.LongTensor(sequence).to(self.device))
             for sequence in batch
         ]
 
@@ -129,6 +133,17 @@ class ProgramDecoder(nn.Module):
             ]
 
         return torch.cat(program_sequence)
+
+    def extract_program(
+            self,
+            hidden,
+            output_all_hidden,
+            num_examples,
+            max_program_length):
+
+        res = self.forward(hidden, output_all_hidden, num_examples, max_program_length)
+        return torch.argmax(res, dim=-1)
+
 
 
 class LuongAttention(nn.Module):
@@ -210,6 +225,7 @@ class SingleAttention(nn.Module):
             attended,
             sequence_lengths,
         )
+        input_ = input_.to(context.device)
         _, hidden = self.lstm(
             torch.cat((input_, context), 1).unsqueeze(0),
             hidden,
@@ -368,6 +384,7 @@ def pad(tensor, sequence_lengths, value, batch_dim, sequence_dim):
         tensor.dim(),
     )
     mask = indices >= expand_vector(sequence_lengths, batch_dim, tensor.dim())
+    mask = mask.to(tensor.device)
     tensor.masked_fill_(mask, value)
 
 ## Should include REINFORCE, MCTS, AC, and SAC

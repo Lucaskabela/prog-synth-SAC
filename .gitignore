@@ -1,0 +1,4 @@
+*.swp
+*.py~
+__pycache__
+*.zip

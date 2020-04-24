@@ -10,18 +10,34 @@ from models import RobustFill
 from utils import sample_example
 import dsl as op
 
+import torch.utils.tensorboard as tb
 
 def max_program_length(expected_programs):
     return max([len(program) for program in expected_programs])
 
 
 def train(
+        args, 
         robust_fill,
         optimizer,
         sample,
         checkpoint_filename,
         checkpoint_step_size,
         checkpoint_print_tensors):
+
+    from os import path
+    train_logger = None
+    if args.log_dir is not None:
+        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'), flush_secs=1)
+
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    print("Beginning training.")
+    print(train_logger)
+    if args.continue_training:
+        robust_fill.load_state_dict(torch.load(path.join(path.dirname(path.abspath(__file__)), checkpoint_filename)))
+    robust_fill = robust_fill.to(device)
+    robust_fill.set_device(device)
+    robust_fill.train()
     example_idx = 0
     while True:
         optimizer.zero_grad()
@@ -41,7 +57,7 @@ def train(
                 program[i] if i < len(program) else padding_index
                 for program in expected_programs
                 for i in range(max_length)
-        ])
+        ]).to(device)
         loss = F.cross_entropy(
             reshaped_actual_programs,
             padded_expected_programs,
@@ -50,6 +66,8 @@ def train(
 
         loss.backward()
         optimizer.step()
+        if train_logger is not None:
+            train_logger.add_scalar('loss', loss, example_idx)
 
         if example_idx % checkpoint_step_size == 0:
             print('Checkpointing at example {}'.format(example_idx))
@@ -58,16 +76,15 @@ def train(
             if checkpoint_print_tensors:
                 print_batch_limit = 3
 
-                print('Examples:')
-                pp.pprint(examples[:print_batch_limit])
+                # print('Examples:')
+                # pp.pprint(examples[:print_batch_limit])
 
                 print('Expected programs:')
                 print(expected_programs[:print_batch_limit])
 
                 print('Actual programs:')
                 print(
-                    F.softmax(actual_programs, dim=2)
-                    .transpose(1, 0)[:print_batch_limit, :, :]
+                    torch.argmax(actual_programs, dim=-1).permute(1, 0)
                 )
 
             if checkpoint_filename is not None:
@@ -116,7 +133,7 @@ def sample_easy(batch_size, string_size, num_examples):
     return programs, examples
 
 
-def train_easy():
+def train_easy(args):
     string_size = 3
     robust_fill = RobustFill(
         string_size=string_size,
@@ -134,6 +151,7 @@ def train_easy():
         )
 
     train(
+        args,
         robust_fill=robust_fill,
         optimizer=optimizer,
         sample=sample,
@@ -162,7 +180,7 @@ def sample_full(token_tables, batch_size, max_expressions, max_characters):
     return program_batch, strings_batch
 
 
-def train_full():
+def train_full(args):
     token_tables = op.build_token_tables()
 
     checkpoint_filename = './checkpoint.pth'
@@ -172,7 +190,7 @@ def train_full():
         hidden_size=256,
         program_size=len(token_tables.op_token_table),
     )
-    optimizer = optim.SGD(robust_fill.parameters(), lr=0.01)
+    optimizer = optim.SGD(robust_fill.parameters(), lr=args.lr)
 
     def sample():
         return sample_full(
@@ -183,31 +201,39 @@ def train_full():
         )
 
     train(
+        args, 
         robust_fill=robust_fill,
         optimizer=optimizer,
         sample=sample,
         checkpoint_filename=checkpoint_filename,
-        checkpoint_step_size=1,
-        checkpoint_print_tensors=False,
+        checkpoint_step_size=1000,
+        checkpoint_print_tensors=True,
     )
 
+def run(args):
+    torch.manual_seed(1337)
+    random.seed(420)
+    train_full(args)
 
-def main():
+def main(arg):
     parser = argparse.ArgumentParser(description='Train RobustFill.')
     parser.add_argument(
         '--dry',
         action='store_true',
         help='run smaller network on easier version of the problem',
     )
+    parser.add_argument('-c', '--continue_training', action='store_true')
+    parser.add_argument('--log_dir')
+    parser.add_argument('--lr', default=1e-3)
     args = parser.parse_args()
 
     torch.manual_seed(1337)
     random.seed(420)
 
     if args.dry:
-        train_easy()
+        train_easy(args)
     else:
-        train_full()
+        train_full(args)
 
 
 if __name__ == '__main__':
