@@ -45,18 +45,19 @@ def train(
         expected_programs, examples = sample()
         max_length = max_program_length(expected_programs)
         actual_programs = robust_fill(examples, max_length)
-
         program_size = actual_programs.size()[2]
         padding_index = -1
+
+        # Output: program_size x b x #ops
+        # need to turn b x #ops x #p_size
         reshaped_actual_programs = (
-            actual_programs.transpose(1, 0)
-            .contiguous()
-            .view(-1, program_size)
+            actual_programs.permute(1, 2, 0)
         )
+        # B x program_size
         padded_expected_programs = torch.LongTensor([
-                program[i] if i < len(program) else padding_index
+                [program[i] if i < len(program) else padding_index 
+                    for i in range(max_length)]
                 for program in expected_programs
-                for i in range(max_length)
         ]).to(device)
         loss = F.cross_entropy(
             reshaped_actual_programs,
@@ -67,7 +68,7 @@ def train(
         loss.backward()
         optimizer.step()
         if train_logger is not None:
-            train_logger.add_scalar('loss', loss, example_idx)
+            train_logger.add_scalar('loss', loss.detach(), example_idx)
 
         if example_idx % checkpoint_step_size == 0:
             print('Checkpointing at example {}'.format(example_idx))
@@ -80,11 +81,11 @@ def train(
                 # pp.pprint(examples[:print_batch_limit])
 
                 print('Expected programs:')
-                print(expected_programs[:print_batch_limit])
+                print(expected_programs[0])
 
                 print('Actual programs:')
                 print(
-                    torch.argmax(actual_programs, dim=-1).permute(1, 0)
+                    torch.argmax(actual_programs.permute(1, 0, 2)[0, 0:len(expected_programs[0])], dim=-1)
                 )
 
             if checkpoint_filename is not None:
@@ -186,8 +187,8 @@ def train_full(args):
     checkpoint_filename = './checkpoint.pth'
     robust_fill = RobustFill(
         string_size=len(op.CHARACTER),
-        string_embedding_size=32,
-        hidden_size=256,
+        string_embedding_size=args.embedding_size,
+        hidden_size=args.hidden_size,
         program_size=len(token_tables.op_token_table),
     )
     optimizer = optim.SGD(robust_fill.parameters(), lr=args.lr)
@@ -195,7 +196,7 @@ def train_full(args):
     def sample():
         return sample_full(
             token_tables,
-            batch_size=1,
+            batch_size=args.batch_size,
             max_expressions=3,
             max_characters=50,
         )
@@ -206,7 +207,7 @@ def train_full(args):
         optimizer=optimizer,
         sample=sample,
         checkpoint_filename=checkpoint_filename,
-        checkpoint_step_size=1000,
+        checkpoint_step_size=128,
         checkpoint_print_tensors=True,
     )
 
@@ -215,7 +216,7 @@ def run(args):
     random.seed(420)
     train_full(args)
 
-def main(arg):
+def main():
     parser = argparse.ArgumentParser(description='Train RobustFill.')
     parser.add_argument(
         '--dry',
@@ -225,6 +226,11 @@ def main(arg):
     parser.add_argument('-c', '--continue_training', action='store_true')
     parser.add_argument('--log_dir')
     parser.add_argument('--lr', default=1e-3)
+    parser.add_argument('--hidden_size', default=512)
+    parser.add_argument('--batch_size', default=8)
+    parser.add_argument('--embedding_size', default=128)
+
+
     args = parser.parse_args()
 
     torch.manual_seed(1337)
