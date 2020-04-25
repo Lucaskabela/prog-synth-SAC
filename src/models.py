@@ -15,6 +15,7 @@ class RobustFill(nn.Module):
 
         # converts character_ngrams to string embeddings
         self.embedding = nn.Embedding(string_size, string_embedding_size)
+        nn.init.xavier_normal_(self.embedding.weight)
 
         # input encoder uses lstm to embed input
         self.input_encoder = AttentionLSTM.lstm(input_size=string_embedding_size, hidden_size=hidden_size)
@@ -69,6 +70,11 @@ class ProgramDecoder(nn.Module):
         self.program_lstm = AttentionLSTM.single_attention(input_size=program_size, hidden_size=hidden_size)
         self.max_pool_linear = nn.Linear(hidden_size, hidden_size)
         self.softmax_linear = nn.Linear(hidden_size, program_size)
+        nn.init.xavier_normal_(self.max_pool_linear.weight, gain=torch.nn.init.calculate_gain('tanh')) 
+        nn.init.xavier_normal_(self.softmax_linear.weight) 
+        nn.init.constant_(self.max_pool_linear.bias, 0.0)
+        nn.init.constant_(self.softmax_linear.bias, 0.0)
+
 
     def forward(self, hidden, output_all_hidden, num_examples, max_program_length):
         program_sequence = []
@@ -92,6 +98,8 @@ class LuongAttention(nn.Module):
     def __init__(self, linear):
         super().__init__()
         self.linear = linear
+        nn.init.xavier_normal_(self.linear.weight) 
+        nn.init.constant_(self.linear.bias, 0.0)
 
     def create(query_size):
         return LuongAttention(nn.Linear(query_size, query_size))
@@ -130,6 +138,11 @@ class LSTMAdapter(nn.Module):
     def __init__(self, lstm):
         super().__init__()
         self.lstm = lstm
+        for name, param in self.lstm.named_parameters():
+            if 'bias' in name:
+                nn.init.constant_(param, 0.0)
+            elif 'weight' in name:
+                nn.init.xavier_normal_(param)
 
     @staticmethod
     def create(input_size, hidden_size):

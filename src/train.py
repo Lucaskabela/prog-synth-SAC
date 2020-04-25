@@ -55,6 +55,8 @@ def train(args, robust_fill, optimizer, sample, checkpoint_filename, checkpoint_
 
         loss = F.cross_entropy(reshaped_actual_programs, padded_expected_programs, ignore_index=padding_index)
         loss.backward()
+        if args.grad_clip > 0.:
+            torch.nn.utils.clip_grad_norm_(robust_fill.parameters(), args.grad_clip)
         optimizer.step()
 
         # Debugging information
@@ -174,8 +176,8 @@ def train_full(args):
 
 
 def run(args):
-    torch.manual_seed(1337)
-    random.seed(420)
+    # torch.manual_seed(1337)
+    # random.seed(420)
     train_full(args)
 
 
@@ -192,7 +194,7 @@ def main():
     parser.add_argument('--checkpoint_step_size', default=128)
     parser.add_argument('--print_tensors', default=True)
     parser.add_argument('--optimizer', default='adam')
-
+    parser.add_argument('--grad_clip', default=.25)
     args = parser.parse_args()
 
     torch.manual_seed(1337)
