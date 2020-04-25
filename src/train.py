@@ -10,7 +10,7 @@ import torch.utils.tensorboard as tb
 import dsl as op
 from models import RobustFill
 from utils import sample_example
-
+from env import to_program
 
 
 def max_program_length(expected_programs):
@@ -75,7 +75,16 @@ def train(args, robust_fill, optimizer, sample, checkpoint_filename, checkpoint_
 
                 print('Actual programs:')
                 actual_to_print = actual_programs[:len(expected_programs[0]), :print_batch_limit, :]
-                print(torch.argmax(actual_to_print.permute(1, 0, 2), dim=-1))
+                tokens = torch.argmax(actual_to_print.permute(1, 0, 2), dim=-1)
+                print(tokens)
+                tokens = tokens[0].tolist()
+                token_tables = op.build_token_tables()
+                global_table = token_tables.token_op_table
+                try:
+                    prog = to_program(tokens, global_table)
+                    print(prog)
+                except Exception:
+                    print("Could not parse program")
 
             if checkpoint_filename is not None:
                 print('Saving to file {}'.format(checkpoint_filename))
