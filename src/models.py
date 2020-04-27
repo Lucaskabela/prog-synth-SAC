@@ -49,6 +49,7 @@ def sorted_rnn(sequences, sequence_lengths, rnn, h0c0=None):
             sequences, sequence_lengths
         )
         # Pack input sequences
+        print(sorted_inputs)
         packed_sequence_input = pack_padded_sequence(
             sorted_inputs,
             sorted_sequence_lengths.data.long().tolist(),
@@ -56,6 +57,8 @@ def sorted_rnn(sequences, sequence_lengths, rnn, h0c0=None):
         )
         # Run RNN
         packed_sequence_output, hiddencell = rnn(packed_sequence_input, h0c0)
+        print("Sequence out length is: " )
+        print(packed_sequence_output)
         # Unpack hidden states
         unpacked_sequence_tensor, _ = pad_packed_sequence(
             packed_sequence_output, batch_first=True
@@ -126,15 +129,11 @@ class RobustFill(nn.Module):
         out_bp_embed = self.embedding(out_batch_pad)
 
         # input_batch_pad [padded seq_len, batch size, embedded dimension]
-        print(in_bp_embed.shape)
-        print(out_bp_embed.shape)
         input_all_hidden, hidden = self.input_encoder(in_bp_embed, in_lengths)
-        print(input_all_hidden.shape)
-        print(hidden.shape)
         output_all_hidden, hidden = self.output_encoder(out_bp_embed, out_lengths, hidden=hidden, pay_attn_to=input_all_hidden)
 
         #first input to the decoder is the <sos> tokens
-        inp = trg[0, :]
+        inp = trg[:, 0]
         batch_size = padded_batch.shape[1]
         trg_len = trg.shape[0]
         trg_vocab_size = self.program_size
@@ -200,14 +199,18 @@ class Encoder(nn.Module):
             elif 'weight' in name:
                 nn.init.xavier_normal_(param)
 
-    def forward(self, src, src_len, hidden=None, pay_attn_to=None):
+    def forward(self, src, src_mask, hidden=None, pay_attn_to=None):
         # src is embedded input padded
-
+        print("In the encoder")
         if self.attention is True:
             assert(pay_attn_to is not None and hidden is not None)
             #pay_attn_to = [batch size, src len, enc hid dim * # directions]
             #a = [batch size, 1, src len]
-            a = self.attn(hidden, pay_attn_to, src_len)
+            if self.bi:
+                hidden_attn = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], -1)
+            else:
+                hidden_attn = hidden[0][-1, :, :]
+            a = self.attn(hidden_attn, pay_attn_to, src_mask)
             a = a.repeat(1, src.shape[1], 1)
             print("Shapes: ")
             print(src.shape)
@@ -215,31 +218,40 @@ class Encoder(nn.Module):
             #weighted = [batch size, 1, enc hid dim * #directions]
             lstm_in = torch.cat((src, a), dim=2)
             print(lstm_in.shape)
-            pay_attn_to = pay_attn_to.permute(1, 0, 2)
-            hidden_in = (pay_attn_to[-4:, :, :int(self.hidden_size/self.num_layers)], pay_attn_to[-4:, :, int(self.hidden_size/self.num_layers):])
-            output, hncn = self.lstm(lstm_in, hidden_in)
-        else:
+            print("Size going in: ")
+            print(lstm_in.shape)
+            print(hidden[0].shape)
             output, hncn = sorted_rnn(
-                src, src_len, self.lstm
-            )  # [seq_len, b_size, p_hid]
-            output, hncn = self.lstm(src)
-        hidden_out = hncn[0]
+                lstm_in, src_mask, self.lstm, hidden
+            )
+            print("Size coming out: ")
+            print(output.shape)
+            print(hncn[0].shape)
+
+        else:
+            print("Going in: ")
+            print(src.shape)
+            output, hncn = sorted_rnn(
+                src, src_mask, self.lstm
+            ) 
+
+        # hidden_out = hncn[0]
         #outputs = [src len, batch size, hid dim * num directions]
         #hidden = [n layers * num directions, batch size, hid dim]
 
         #hidden is stacked [forward_1, backward_1, forward_2, backward_2, ...], so outputs are always from the last layer
-        if (self.bi):
-            print(torch.cat((hidden_out[-2,:,:], hidden_out[-1,:,:]), dim = 1).shape)
-            hidden_out = self.nonlinearity(self.fc(torch.cat((hidden_out[-2,:,:], hidden_out[-1,:,:]), dim = 1)))
-        else:
-            hidden_out = self.nonlinearity(self.fc(hidden_out[-1,:,:]))
+        # if (self.bi):
+        #     print(torch.cat((hidden_out[-2,:,:], hidden_out[-1,:,:]), dim = 1).shape)
+        #     hidden_out = self.nonlinearity(self.fc(torch.cat((hidden_out[-2,:,:], hidden_out[-1,:,:]), dim = 1)))
+        # else:
+        #     hidden_out = self.nonlinearity(self.fc(hidden_out[-1,:,:]))
 
         print("Output: ")
         print(output.shape)
-        print(hidden_out.shape)
+        print(hncn[0].shape)
         #outputs = [src len, batch size, hid dim * num directions]
         #hidden = [batch size, dec hid dim]
-        return output, hidden_out
+        return output, hncn
 
 
 class Attention(nn.Module):
@@ -292,7 +304,7 @@ class Decoder(nn.Module):
         self.attention=attention
 
         if attention is True:
-            self.attn = Attention(enc_hidden)
+            self.attn = Attention(self.hidden_size)
 
         self.max_pool_linear = nn.Linear(enc_hidden + dec_hid_dim + embed_dim, enc_hidden + dec_hid_dim + embed_dim)
         self.softmax_linear = nn.Linear(enc_hidden + dec_hid_dim + embed_dim, out_dim)
@@ -312,14 +324,23 @@ class Decoder(nn.Module):
             elif 'weight' in name:
                 nn.init.xavier_normal_(param)
 
-    def forward(self, src, src_len, hidden, encoder_out, num_examples=4):
+    def forward(self, src, src_mask, hidden, encoder_out, num_examples=4):
 
         #embedded = [1, batch size, emb dim]
         src.unsqueeze(0)
         embedded = self.embedding(src)
                 
         #a = [batch size, 1, src len]
-        a = self.attn(hidden, encoder_out).unsqueeze(1)
+        print("In the decoder: ")
+        print(hidden[0].shape)
+        print(encoder_out.shape)
+        if self.bi:
+            hidden_attn = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], -1)
+        else:
+            hidden_attn = hidden[0][-1, :, :]
+
+        a = self.attn(hidden_attn, encoder_out, src_mask)
+        print(a.shape)
         #pay_attn_to = [batch size, src len, enc hid dim]
         encoder_out = encoder_out.permute(1, 0, 2)
         weighted = torch.bmm(a, encoder_out)
@@ -328,7 +349,9 @@ class Decoder(nn.Module):
 
         lstm_in = torch.cat((embedded, weighted), dim = 2)
         hidden_in = hidden.unsqueeze(0)
-        output, hidden_out = self.lstm(lstm_in, hidden_in)
+        output, hidden_out = sorted_rnn(
+                lstm_in, src_mask, self.lstm, hidden_in
+        )
                     
         #outputs = [src len, batch size, hid dim * num directions]
         #hidden = [n layers * num directions, batch size, hid dim]
