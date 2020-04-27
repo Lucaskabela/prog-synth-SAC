@@ -40,18 +40,19 @@ def train(args, robust_fill, optimizer, sample, checkpoint_filename, checkpoint_
         optimizer.zero_grad()
 
         expected_programs, examples = sample()
+        expeted_programs = [ e.insert(0, 0) for e in expected_programs]
         max_length = max_program_length(expected_programs)
-        actual_programs = robust_fill(examples, max_length)
-        padding_index = -1
+        padding_index = 0
+        padded_expected_programs = torch.tensor([
+                [program[i] if i < len(program) else padding_index for i in range(max_length)]
+                for program in expected_programs
+        ], dtype=torch.long, device=device)
+        actual_programs = robust_fill(examples, padded_expected_programs, max_length)
 
         # Output: program_size x b x #ops
         # need to turn b x #ops x #p_size
         reshaped_actual_programs = (actual_programs.permute(1, 2, 0))
         # B x program_size
-        padded_expected_programs = torch.LongTensor([
-                [program[i] if i < len(program) else padding_index for i in range(max_length)]
-                for program in expected_programs
-        ]).to(device)
 
         loss = F.cross_entropy(reshaped_actual_programs, padded_expected_programs, ignore_index=padding_index)
         loss.backward()
@@ -160,7 +161,7 @@ def train_full(args):
 
     token_tables = op.build_token_tables()
     checkpoint_filename = args.checkpoint_filename
-    robust_fill = RobustFill(string_size=len(op.CHARACTER), string_embedding_size=args.embedding_size,
+    robust_fill = RobustFill(string_size=len(op.CHARACTER), embed_dim=args.embedding_size,
         hidden_size=args.hidden_size, program_size=len(token_tables.op_token_table),
     )
     optimizer = optim.Adam(robust_fill.parameters(), lr=args.lr)
