@@ -5,6 +5,7 @@ from torch.nn.utils.rnn import pack_sequence, pad_sequence, pack_padded_sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import random
 
 def _sort_batch_by_length(tensor, sequence_lengths):
     """
@@ -49,7 +50,6 @@ def sorted_rnn(sequences, sequence_lengths, rnn, h0c0=None):
             sequences, sequence_lengths
         )
         # Pack input sequences
-        print(sorted_inputs)
         packed_sequence_input = pack_padded_sequence(
             sorted_inputs,
             sorted_sequence_lengths.data.long().tolist(),
@@ -57,8 +57,6 @@ def sorted_rnn(sequences, sequence_lengths, rnn, h0c0=None):
         )
         # Run RNN
         packed_sequence_output, hiddencell = rnn(packed_sequence_input, h0c0)
-        print("Sequence out length is: " )
-        print(packed_sequence_output)
         # Unpack hidden states
         unpacked_sequence_tensor, _ = pad_packed_sequence(
             packed_sequence_output, batch_first=True
@@ -66,10 +64,9 @@ def sorted_rnn(sequences, sequence_lengths, rnn, h0c0=None):
         # Restore the original order in the batch and return all hidden states
         return unpacked_sequence_tensor.index_select(0, restoration_indices), hiddencell
 
-
 class RobustFill(nn.Module):
-    def __init__( self, string_size, embed_dim, hidden_size, program_size, 
-          bi=True, num_layers=2, device='cpu'):
+    def __init__( self, string_size, string_embed_dim, hidden_size, program_size, prog_embed_dim,
+          bi=True, num_layers=2, dropout=0., device='cpu'):
         super().__init__()
 
         # set the device of this robustfill model, default to cpu
@@ -77,19 +74,29 @@ class RobustFill(nn.Module):
         self.bi=bi
         self.num_layers=num_layers
         self.program_size=program_size
-        self.embedding = nn.Embedding(string_size, embed_dim)
-        nn.init.xavier_normal_(self.embedding.weight)
+        self.string_size=string_size
+
+
+        self.src_embed = nn.Embedding(string_size + 1, string_embed_dim)
+        self.prog_embed = nn.Embedding(program_size + 1, prog_embed_dim)
+        nn.init.uniform_(self.src_embed.weight, -.1, .1)
+        nn.init.uniform_(self.prog_embed.weight, -.1, .1)
+
+        bi_mult = 1
+        if self.bi:
+            bi_mult = 2
 
         # input encoder uses lstm to embed input
-        self.input_encoder = Encoder(embed_dim=embed_dim, hidden_size=hidden_size, 
-            dec_hid_dim=hidden_size*2, bi=bi, num_layers=num_layers)
+        self.input_encoder = Encoder(string_embed_dim, hidden_size, 
+            bi=bi, num_layers=num_layers, dropout=dropout)
 
-        # output decoder with attention, default to single attention architecture
-        self.output_encoder = Encoder(embed_dim=embed_dim, hidden_size=hidden_size, 
-            dec_hid_dim=hidden_size*2, attention=True, bi=bi, num_layers=num_layers)
+        self.output_attention = AlignedAttention(hidden_size, key_size=string_embed_dim, bi=True)
+        self.output_encoder = Encoder(string_embed_dim + hidden_size*bi_mult, hidden_size=hidden_size, 
+            bi=bi, num_layers=num_layers, dropout=dropout)
 
-        self.program_decoder = Decoder(embed_dim=embed_dim, enc_hidden=hidden_size, dec_hid_dim=hidden_size*4, 
-            out_dim=program_size, attention=True, bi=True)
+        self.decoder_attention = BahdanauAttention(hidden_size, bi=True)
+        self.program_decoder = Decoder(prog_embed_dim, hidden_size, program_size, 
+            bi=bi, num_layers=num_layers, dropout=dropout)
 
 
     def set_device(self, device):
@@ -107,49 +114,68 @@ class RobustFill(nn.Module):
     def _split_flatten_examples(self, batch):
         in_list = [torch.tensor(input_sequence, device=self.device, dtype=torch.long) for examples in batch for input_sequence, _ in examples]
         out_list = [torch.tensor(output_sequence, device=self.device, dtype=torch.long) for examples in batch for _, output_sequence in examples]
-        return len(in_list), in_list + out_list
+        return in_list, out_list
 
-    # Expects:
-    # list (batch_size) of tuples (input, output) of list (sequence_length) of token indices
-    def forward(self, batch, trg, max_program_length):
-        print(trg.shape)
+    def encoding(self, batch):
         num_examples = RobustFill._check_num_examples(batch)
-        split_idx, exs = self._split_flatten_examples(batch)
+        in_list, out_list = self._split_flatten_examples(batch)
 
         # Embed the i/o examples
-        padded_batch = pad_sequence(exs, padding_value=1, batch_first=True)
-        in_batch_pad = padded_batch[:split_idx]
-        in_mask = (in_batch_pad != 1) # [batch_size, seq_len]
+        in_batch_pad = pad_sequence(in_list, padding_value=self.string_size, batch_first=True)
+        in_mask = (in_batch_pad != self.string_size) # [batch_size, seq_len]
         in_lengths = in_mask.long().sum(-1)
-        in_bp_embed = self.embedding(in_batch_pad)
+        in_bp_embed = self.src_embed(in_batch_pad)
 
-        out_batch_pad = padded_batch[split_idx:]
-        out_mask = (out_batch_pad != 1) # [batch_size, seq_len]
+        out_batch_pad = pad_sequence(out_list, padding_value=self.string_size, batch_first=True)
+        out_mask = (out_batch_pad != self.string_size) # [batch_size, seq_len]
         out_lengths = out_mask.long().sum(-1)
-        out_bp_embed = self.embedding(out_batch_pad)
+        out_bp_embed = self.src_embed(out_batch_pad)
 
         # input_batch_pad [padded seq_len, batch size, embedded dimension]
         input_all_hidden, hidden = self.input_encoder(in_bp_embed, in_lengths)
-        output_all_hidden, hidden = self.output_encoder(out_bp_embed, out_lengths, hidden=hidden, pay_attn_to=input_all_hidden)
+
+        if self.bi:
+            hidden_query = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], dim=-1).unsqueeze(1)
+        else:
+            hidden_query = hidden[0].unsqueeze(1)
+
+        att_in, _ = self.output_attention(out_bp_embed, input_all_hidden, ~in_mask)
+        output_all_hidden, hidden = self.output_encoder(torch.cat([out_bp_embed, att_in], dim=2), 
+            out_lengths, hidden=hidden)
+
+        return output_all_hidden, hidden, out_mask
+
+
+       
+    # Expects:
+    # list (batch_size) of tuples (input, output) of list (sequence_length) of token indices
+    def forward(self, batch, trg, teacher_forcing_ratio=.5, num_examples=4):
+        encoder_hid, hidden, out_mask = self.encoding(batch)
+        # precompute key projection
+        proj_key = self.decoder_attention.key_layer(encoder_hid)
 
         #first input to the decoder is the <sos> tokens
-        inp = trg[:, 0]
-        batch_size = padded_batch.shape[1]
-        trg_len = trg.shape[0]
+        batch_size_exs = hidden[0].shape[1]
+        batch_size_progs = trg.shape[0]
+        prog_len = trg.shape[1]
         trg_vocab_size = self.program_size
-        
+
         #tensor to store decoder outputs
-        results = torch.zeros(trg_len, batch_size, trg_vocab_size).to(self.device)
-        
-        for t in range(1, len(trg)):
-            print(inp)
+        results = [None] * prog_len
+        inp = torch.tensor([self.program_size] * batch_size_exs, dtype=torch.long, device=self.device)
+        for t in range(prog_len):
+
             #insert input token embedding, previous hidden state and all encoder hidden states
             #receive output tensor (predictions) and new hidden state
-            output, hidden = self.program_decoder(inp, out_mask, hidden, output_all_hidden)
-            
+            if self.bi:
+                hidden_query = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], dim=-1).unsqueeze(1)
+            else:
+                hidden_query = hidden[0].unsqueeze(1)
+
+            context, _ = self.decoder_attention(hidden_query, proj_key, value=encoder_hid, mask=~out_mask)
+            output, hidden = self.program_decoder(self.prog_embed(inp), context, hidden)
             #place predictions in a tensor holding predictions for each token
             results[t] = output
-            
             #decide if we are going to use teacher forcing or not
             teacher_force = random.random() < teacher_forcing_ratio
             
@@ -158,223 +184,207 @@ class RobustFill(nn.Module):
             
             #if teacher forcing, use actual next token as next input
             #if not, use predicted token
-            inp = trg[t] if teacher_force else top1
-
+            inp = trg[:, t] if teacher_force else top1
+            inp = inp.view(-1, 1).repeat(1, num_examples).view(batch_size_exs)
+        results = torch.stack(results)
         return results
 
+        
 class Encoder(nn.Module):
-    def __init__(self, embed_dim, hidden_size, dec_hid_dim=512, attention=False, bi=False, num_layers=1):
-        super().__init__()
+    def __init__(self, input_size, hidden_size, num_layers=1, bi=False, dropout=0.):
+        super(Encoder, self).__init__()
 
-        self.lstm = nn.LSTM(input_size=embed_dim, hidden_size=hidden_size, 
-            bidirectional=bi, num_layers=num_layers, batch_first=True)
-        self.nonlinearity = torch.nn.Tanh()
-
-        # Initialize nonlinearity
-        self.nonlinear='tanh'
-        self.num_layers=num_layers
-        self.bi=bi
-        self.hidden_size = hidden_size
-        if bi is True:
-            self.hidden_size*=2
-        self.attention=attention
-        self.fc = nn.Linear(self.hidden_size, dec_hid_dim)
-
-        if self.attention is True:
-            self.attn = Attention(self.hidden_size)
-            self.lstm = nn.LSTM(input_size=embed_dim + self.hidden_size, hidden_size=hidden_size, 
-                bidirectional=bi, num_layers=num_layers, batch_first=True)        
-        else:
-            self.attn = None
-
+        self.num_layers = num_layers
+        self.bi = bi
+        self.rnn = nn.LSTM(input_size, hidden_size, num_layers=num_layers, bidirectional=bi, 
+            batch_first=True, dropout=dropout)
+        
         self.init_model_()
 
 
     def init_model_(self):
-        nn.init.xavier_normal_(self.fc.weight, gain=nn.init.calculate_gain(self.nonlinear))
-        nn.init.constant_(self.fc.bias, 0.0)
-        for name, param in self.lstm.named_parameters():
+        for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0.0)
             elif 'weight' in name:
-                nn.init.xavier_normal_(param)
+                nn.init.uniform_(param, -.1, .1)
 
-    def forward(self, src, src_mask, hidden=None, pay_attn_to=None):
-        # src is embedded input padded
-        print("In the encoder")
-        if self.attention is True:
-            assert(pay_attn_to is not None and hidden is not None)
-            #pay_attn_to = [batch size, src len, enc hid dim * # directions]
-            #a = [batch size, 1, src len]
-            if self.bi:
-                hidden_attn = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], -1)
-            else:
-                hidden_attn = hidden[0][-1, :, :]
-            a = self.attn(hidden_attn, pay_attn_to, src_mask)
-            a = a.repeat(1, src.shape[1], 1)
-            print("Shapes: ")
-            print(src.shape)
-            print(a.shape)
-            #weighted = [batch size, 1, enc hid dim * #directions]
-            lstm_in = torch.cat((src, a), dim=2)
-            print(lstm_in.shape)
-            print("Size going in: ")
-            print(lstm_in.shape)
-            print(hidden[0].shape)
-            output, hncn = sorted_rnn(
-                lstm_in, src_mask, self.lstm, hidden
-            )
-            print("Size coming out: ")
-            print(output.shape)
-            print(hncn[0].shape)
-
-        else:
-            print("Going in: ")
-            print(src.shape)
-            output, hncn = sorted_rnn(
-                src, src_mask, self.lstm
-            ) 
-
-        # hidden_out = hncn[0]
-        #outputs = [src len, batch size, hid dim * num directions]
-        #hidden = [n layers * num directions, batch size, hid dim]
-
-        #hidden is stacked [forward_1, backward_1, forward_2, backward_2, ...], so outputs are always from the last layer
-        # if (self.bi):
-        #     print(torch.cat((hidden_out[-2,:,:], hidden_out[-1,:,:]), dim = 1).shape)
-        #     hidden_out = self.nonlinearity(self.fc(torch.cat((hidden_out[-2,:,:], hidden_out[-1,:,:]), dim = 1)))
-        # else:
-        #     hidden_out = self.nonlinearity(self.fc(hidden_out[-1,:,:]))
-
-        print("Output: ")
-        print(output.shape)
-        print(hncn[0].shape)
-        #outputs = [src len, batch size, hid dim * num directions]
-        #hidden = [batch size, dec hid dim]
+    def forward(self, src, src_len, hidden=None):
+        # src is b x src_len x input_size
+        output, hncn = sorted_rnn(
+            src, src_len, self.rnn, hidden
+        ) 
+        # if bi is true need to manually concatanate
+        #outputs = [batch size, src_len, hid dim * num directions]
         return output, hncn
 
 
-class Attention(nn.Module):
-    def __init__(self, query):
-        super().__init__()
-        
-        self.attn = nn.Linear(query, query)
-        nn.init.xavier_normal_(self.attn.weight)
-        nn.init.constant_(self.attn.bias, 0.0)
-
-    def forward(self, query, attend_to, mask):
-        
-        print("Attention shapes: ")
-        key = self.attn(query)
-        print(key.shape)
-        attended = attend_to.permute(1, 0, 2)
-        print(attend_to.shape)
-
-        prod = torch.matmul(attended.unsqueeze(2), key.unsqueeze(2))
-        align = prod.squeeze(3).squeeze(2)
-        align.masked_fill_(mask.bool(), -float('inf'))
-        align = align.transpose(1, 0)
-        print(align.shape)
-        align = F.softmax(align, dim=1)
-        context = (align.unsqueeze(1).bmm(attended.transpose(1, 0)))
-        return context
-
-
 class Decoder(nn.Module):
-    def __init__(self, embed_dim, enc_hidden, dec_hid_dim, out_dim, 
-            nonlinear='tanh', attention=False, bi=False, num_layers=1):
-        super().__init__()
-        self.embedding = nn.Embedding(out_dim, embed_dim)
-        self.lstm = nn.LSTM(input_size=enc_hidden + embed_dim, hidden_size=dec_hid_dim, 
-            bidirectional=bi, num_layers=num_layers)
+    def __init__(self, emb_size, hidden_size, out_dim, num_layers=1, dropout=0., bi=False, bridge=True):
+        super(Decoder, self).__init__()
 
-        # Initialize nonlinearity
-        self.nonlinear=nonlinear
-        if nonlinear == 'relu':
-            self.nonlinearity = torch.nn.ReLU()
-        elif nonlinear == 'tanh':
-            self.nonlinearity = torch.nn.Tanh()
-        else:
-            self.nonlinearity = None
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bi = bi
+        self.rnn = nn.LSTM(emb_size + hidden_size*2, hidden_size, 
+            bidirectional=bi, num_layers=num_layers, batch_first=True, dropout=dropout)
 
-        self.bi=bi
-        self.hidden_size = enc_hidden
-        if bi is True:
-            self.hidden_size*=2
-        self.attention=attention
-
-        if attention is True:
-            self.attn = Attention(self.hidden_size)
-
-        self.max_pool_linear = nn.Linear(enc_hidden + dec_hid_dim + embed_dim, enc_hidden + dec_hid_dim + embed_dim)
-        self.softmax_linear = nn.Linear(enc_hidden + dec_hid_dim + embed_dim, out_dim)
+        bi_mult = 1
+        if self.bi:
+            bi_mult = 2
+        self.bridge = nn.Linear(bi_mult*hidden_size, hidden_size) if bridge else None
+        self.max_pool_layer = nn.Linear(bi_mult * hidden_size + bi_mult*hidden_size + emb_size, hidden_size)
+        self.softmax_linear = nn.Linear(hidden_size, out_dim)
         self.init_model_()
 
     def init_model_(self):
-        nn.init.xavier_normal_(self.embedding.weight)
-        nn.init.xavier_normal_(self.max_pool_linear.weight, gain=nn.init.calculate_gain(self.nonlinear))
-        nn.init.constant_(self.max_pool_linear.bias, 0.0)
+        nn.init.xavier_normal_(self.max_pool_layer.weight, gain=nn.init.calculate_gain('tanh'))
+        nn.init.constant_(self.max_pool_layer.bias, 0.0)
 
-        nn.init.xavier_normal_(self.softmax_linear.weight, gain=nn.init.calculate_gain(self.nonlinear))
+        nn.init.xavier_normal_(self.softmax_linear.weight, gain=nn.init.calculate_gain('tanh'))
         nn.init.constant_(self.softmax_linear.bias, 0.0)
 
-        for name, param in self.lstm.named_parameters():
+        if self.bridge is not None:
+            nn.init.xavier_normal_(self.bridge.weight, gain=nn.init.calculate_gain('tanh'))
+            nn.init.constant_(self.bridge.bias, 0.0)
+
+        for name, param in self.rnn.named_parameters():
             if 'bias' in name:
                 nn.init.constant_(param, 0.0)
             elif 'weight' in name:
-                nn.init.xavier_normal_(param)
+                nn.init.uniform_(param, -.1, .1)
 
-    def forward(self, src, src_mask, hidden, encoder_out, num_examples=4):
+    def forward(self, embed, context, hidden, num_examples=4):
 
         #embedded = [1, batch size, emb dim]
-        src.unsqueeze(0)
-        embedded = self.embedding(src)
-                
-        #a = [batch size, 1, src len]
-        print("In the decoder: ")
-        print(hidden[0].shape)
-        print(encoder_out.shape)
-        if self.bi:
-            hidden_attn = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], -1)
-        else:
-            hidden_attn = hidden[0][-1, :, :]
-
-        a = self.attn(hidden_attn, encoder_out, src_mask)
-        print(a.shape)
-        #pay_attn_to = [batch size, src len, enc hid dim]
-        encoder_out = encoder_out.permute(1, 0, 2)
-        weighted = torch.bmm(a, encoder_out)
-        #weighted = [1, batch size, enc hid dim * 2]
-        weighted = weighted.permute(1, 0, 2)
-
-        lstm_in = torch.cat((embedded, weighted), dim = 2)
-        hidden_in = hidden.unsqueeze(0)
-        output, hidden_out = sorted_rnn(
-                lstm_in, src_mask, self.lstm, hidden_in
-        )
-                    
+        embed = embed.unsqueeze(1)
+        lstm_in = torch.cat([embed, context], dim=-1)
+        output, hidden = self.rnn(lstm_in, hidden)
         #outputs = [src len, batch size, hid dim * num directions]
         #hidden = [n layers * num directions, batch size, hid dim]
 
-        #hidden is stacked [forward_1, backward_1, forward_2, backward_2, ...]
-        #outputs are always from the last layer
-        
-        #hidden [-2, :, : ] is the last of the forwards RNN 
-        #hidden [-1, :, : ] is the last of the backwards RNN
-        hidden_out = self.fc(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
-        
+        if self.bi:
+            hidden_out = torch.cat([hidden[0][-1, :, :], hidden[0][-2, :, :]], dim=-1)
+        else:
+            hidden_out = hidden[0]
         #outputs = [src len, batch size, hid dim * num directions]
         #hidden = [batch size, dec hid dim]
-
-        unpooled = (torch.tanh(self.max_pool_linear(hidden_out))
-            .view(-1, num_examples, self.hidden_size)
-            .permute(0, 2, 1)
-        )
+        hidden_out = torch.cat([embed, hidden_out.unsqueeze(1), context], dim=2)
+        unpooled = (torch.tanh(self.max_pool_layer(hidden_out))).view(-1, num_examples, hidden[0].shape[-1])
+        unpooled = unpooled.permute(0, 2, 1)
         pooled = F.max_pool1d(unpooled, num_examples).squeeze(2)
         program_embedding = self.softmax_linear(pooled)
+        return F.softmax(program_embedding, dim=1), hidden
 
-        return F.softmax(program_embedding, dim=1)
+    def init_hidden(self, encoder_final):
+        """Returns the initial decoder state,
+        conditioned on the final encoder state."""
+        if encoder_final is None:
+            return None  # start with zeros
+        return torch.tanh(self.bridge(encoder_final))    
 
+
+class AlignedAttention(nn.Module):
+    """
+    This module returns attention scores over sequences. Details can be
+    found in these papers:
+        - Aligned question embedding (Chen et al. 2017):
+             https://arxiv.org/pdf/1704.00051.pdf
+        - Context2Query (Seo et al. 2017):
+             https://arxiv.org/pdf/1611.01603.pdf
+
+    Args:
+
+    Inputs:
+        p: Passage tensor (float), [batch_size, p_len, p_dim].
+        q: Question tensor (float), [batch_size, q_len, q_dim].
+        q_mask: Question mask (bool), an elements is `False` if it's a word
+            `True` if it's a pad token. [batch_size, q_len].
+
+    Returns:
+        Attention scores over question sequences, [batch_size, p_len, q_len].
+    """
+    def __init__(self, hidden_size, key_size=None, query_size=None, bi=False):
+        super().__init__()
+        bi_mult=1
+        if (bi):
+            bi_mult=2
+
+        # We assume a bi-directional encoder so key_size is 2*hidden_size
+        key_size = hidden_size if key_size is None else key_size
+        query_size = bi_mult* hidden_size if query_size is None else query_size
+
+        self.key_layer = nn.Linear(key_size, hidden_size, bias=False)
+        self.query_layer = nn.Linear(query_size, hidden_size, bias=False)
+        nn.init.xavier_normal_(self.key_layer.weight)
+        nn.init.xavier_normal_(self.query_layer.weight)
+
+        self.relu = nn.ReLU()
+        # to store attention scores
+        self.alphas = None
+
+    def forward(self, k, q, q_mask):
+        # Compute scores
+        p_key = self.relu(self.key_layer(k))  # [batch_size, k_len, h_dim]
+        q_key = self.relu(self.query_layer(q))  # [batch_size, q_len, h_dim]
+        scores = p_key.bmm(q_key.transpose(2, 1))  # [batch_size, k_len, q_len]
+
+        # Stack question mask k_len times
+        q_mask = q_mask.unsqueeze(1).repeat(1, scores.size(1), 1)
+
+        # Assign -inf to pad tokens
+        scores.data.masked_fill_(q_mask.data, -float('inf'))
+        # Normalize along question length
+        self.alphas = F.softmax(scores, 2)
+
+        return self.alphas.bmm(q), self.alphas # [batch_size, k_len, h_dim]
+
+class BahdanauAttention(nn.Module):
+    """Implements Bahdanau (MLP) attention"""
+    
+    def __init__(self, hidden_size, key_size=None, query_size=None, bi=False):
+        super(BahdanauAttention, self).__init__()
+
+        bi_mult=1
+        if (bi):
+            bi_mult=2
+
+        # We assume a bi-directional encoder so key_size is 2*hidden_size
+        key_size = bi_mult * hidden_size if key_size is None else key_size
+        query_size = bi_mult * hidden_size if query_size is None else query_size
+
+        self.key_layer = nn.Linear(key_size, hidden_size, bias=False)
+        self.query_layer = nn.Linear(query_size, hidden_size, bias=False)
+        self.energy_layer = nn.Linear(hidden_size, 1, bias=False)
+        nn.init.xavier_normal_(self.key_layer.weight)
+        nn.init.xavier_normal_(self.query_layer.weight)
+        nn.init.xavier_normal_(self.energy_layer.weight)
+        # to store attention scores
+        self.alphas = None
+        
+    def forward(self, query=None, proj_key=None, value=None, mask=None):
+       
+        assert mask is not None, "mask is required"
+
+        # We first project the query (the decoder state).
+        # The projected keys (the encoder states) were already pre-computated.
+        query = self.query_layer(query)
+        
+        # Calculate scores.
+        scores = self.energy_layer(torch.tanh(query + proj_key))
+        scores = scores.squeeze(2)
+        
+        # Mask out invalid positions.
+        # The mask marks valid positions so we invert it using `mask & 0`.
+        scores.data.masked_fill_(mask.data, -float('inf')).unsqueeze(1)
+        # Turn scores to probabilities.
+        alphas = F.softmax(scores, dim=-1).unsqueeze(1)
+        self.alphas = alphas        
+
+        # The context vector is the weighted sum of the values.
+        context = torch.bmm(alphas, value)
+        # context shape: [B, 1, 2D], alphas shape: [B, 1, M]
+        return context, alphas
 
 class ProgramDecoder(nn.Module):
     def __init__(self, hidden_size, program_size):
