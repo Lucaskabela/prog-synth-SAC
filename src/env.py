@@ -5,10 +5,9 @@ import dsl as op
 from utils import sample_example
 
 # Defines an MDP for robust fill
-# This mdp is fairly simple - episodes are 1 action only in a very high dimensional
-# action space.  The action is the program.  A reward +1 is given for each example
-# the model correctly predicted, and -1 for each example the model incorrectly 
-# predicted. State observations are the i/o examples
+# This mdp is fairly simple - episodes are a sequence of predictions from the model
+# which terminates when the model predicts 0. Reward is given all or none (0 or 1)
+# based on consistency with the examples observed
 class RobustFillEnv():
 
     def __init__(self, max_expressions=3, max_characters=50):
@@ -16,11 +15,21 @@ class RobustFillEnv():
         self.max_characters = max_characters
         self.token_tables = op.build_token_tables()
         self.reference_prog = None
+        self.examples = None
+
 
     # Step takes an action from the agent, and returns
     # next_state, reward, done, info
     def step(self, action):
         # check action == reference_prog
+
+        # example = sample_example(max_expressions=max_expressions, max_characters=max_characters)
+        #program = example.program.to_tokens(token_tables.op_token_table)
+        #strings = [
+        #    (op.tokenize_string(input_, token_tables.string_token_table),
+        #     op.tokenize_string(output, token_tables.string_token_table))
+        #    for input_, output in example.strings
+        #]
         reward = 0
         if (action == reference_prog[0]):
             reward = 1
@@ -35,7 +44,7 @@ class RobustFillEnv():
         self.reference_prog = sample(self.token_tables, -1, self.max_expressions, self.max_characters)
         return self.reference_prog[1] # return the i/o strings only
 
-def sample(token_tables, batch_size, max_expressions, max_characters):
+def sample(token_tables, max_expressions, max_characters):
 
     example = sample_example(max_expressions=max_expressions, max_characters=max_characters)
     program = example.program.to_tokens(token_tables.op_token_table)
@@ -46,6 +55,8 @@ def sample(token_tables, batch_size, max_expressions, max_characters):
     ]
     return program, strings
 
+
+# Should this be in the utils???
 def to_program(tokens, token_op_table):
 
     # [40, 1, 3, 1052, 1, 4, 864, 869, 0]
@@ -105,5 +116,3 @@ def op_to_prog(tokens, token_op_table):
         return curr_op
 
     return res
-
-# Need a method to ops, which converts the integer tokens to the program!
