@@ -80,9 +80,13 @@ class RobustFill(nn.Module):
 
         input_all_hidden, hidden = self.input_encoder(input_batch, input_length, None, None)
         output_all_hidden, hidden = self.output_encoder(output_batch, output_length, hidden=hidden, attended=input_all_hidden, mask=p_mask)
+
+        # return the forward method of the decoder
         return self.program_decoder(hidden=hidden, output_all_hidden=output_all_hidden, out_len=output_length,
             num_examples=num_examples, tgt_progs=tgt_progs)
 
+        # TODO - add an "rl forward" method, which  encodes then single steps until
+        # gets a 0.
 
 class ProgramDecoder(nn.Module):
     def __init__(self, hidden_size, program_size):
@@ -115,22 +119,30 @@ class ProgramDecoder(nn.Module):
         # initial input is zero vector
         decoder_input = torch.stack([torch.zeros(1, self.program_size) for _ in range(hidden[0].size()[1])])
         decoder_input = decoder_input.to(hidden[0].device)
-        correct_onehot = torch.zeros(hidden[0].shape[1], self.program_size) ## First iter, make blank
+
+        ## For teacher learning, first iter, make blank
+        correct_onehot = torch.zeros(hidden[0].shape[1], self.program_size)
 
         # here we should decide to use teacher or not - take trg and make a one-hot encoding
         for i in range(tgt_progs.shape[1]):
-            program_embedding, output_all_hidden, hidden = self.single_step_forward(decoder_input, hidden, output_all_hidden, out_len, num_examples)
+
+            program_embedding, output_all_hidden, hidden = self.single_step_forward(decoder_input, 
+                hidden, output_all_hidden, out_len, num_examples)
+
             program_sequence.append(program_embedding.unsqueeze(0))
 
+            # get input to network for next iteration:
             if random.random() < teacher_ratio: 
-                # Dummy input that HAS to be 2D for the scatter (you can use view(-1,1) if needed)
+                # Get actual, teacher learning time!
                 correct_prev = tgt_progs[:, i]
-                correct_prev = torch.stack([t for t in correct_prev.split(1) for _ in range(num_examples)])
+                correct_prev = torch.stack([t for t in correct_prev.split(1) 
+                    for _ in range(num_examples)])
                 correct_onehot.zero_()
                 correct_onehot.scatter(1, correct_prev, 1)
                 decoder_input = correct_onehot.unsqueeze(1)
             else:
-                decoder_input = torch.stack([F.softmax(p, dim=1) for p in program_embedding.split(1) for _ in range(num_examples)])
+                decoder_input = torch.stack([F.softmax(p, dim=1) 
+                    for p in program_embedding.split(1) for _ in range(num_examples)])
 
         return torch.cat(program_sequence)
 
@@ -197,7 +209,7 @@ class LSTMAdapter(nn.Module):
         return all_hidden, hidden
 
 
-class Context2Query(nn.Module):
+class SequenceAttention(nn.Module):
     """
     This module returns attention scores over sequences. Details can be
     found in these papers:
@@ -207,18 +219,17 @@ class Context2Query(nn.Module):
              https://arxiv.org/pdf/1611.01603.pdf
     Args:
     Inputs:
-        p: Passage tensor (float), [batch_size, p_len, p_dim].
-        q: Question tensor (float), [batch_size, q_len, q_dim].
-        q_mask: Question mask (bool), an elements is `False` if it's a word
-            `True` if it's a pad token. [batch_size, q_len].
+        k: key tensor (float), [batch_size, p_len, p_dim].
+        q: query tensor (float), [batch_size, q_len, q_dim].
+        q_mask: Query mask (bool), an elements is `True` if it's pad token
+            `False` if it's original. [batch_size, q_len].
     Returns:
-        Attention scores over question sequences, [batch_size, p_len, q_len].
+        Attention scores over query sequences, [batch_size, p_len, q_len].
     """
     def __init__(self, hidden_size, key_size=None, query_size=None):
         super().__init__()
-       
 
-        # We assume a bi-directional encoder so key_size is 2*hidden_size
+        # default to using key stuff
         key_size = hidden_size if key_size is None else key_size
         query_size = hidden_size if query_size is None else query_size
 
@@ -247,19 +258,25 @@ class Context2Query(nn.Module):
         self.alphas = F.softmax(scores, 2)
         return self.alphas.bmm(q.permute(1, 0, 2)).permute(1, 0, 2)
 
+
+# LSTM Wrapper for the Sequence Attention
 class AlignedAttention(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
-        self.attention = Context2Query(hidden_size, key_size=input_size)
+        self.attention = SequenceAttention(hidden_size, key_size=input_size)
         self.lstm = nn.LSTM(input_size + hidden_size, hidden_size)
 
     def forward(self, input_, hidden, attended_args, mask=None):
+        # consistent with other foward method interfaces, attended_args
+        # is tuple
         attended, sequence_lengths = attended_args
         context = self.attention(input_, attended, sequence_lengths, mask)
-        all_hidden, final_hidden = sorted_rnn(torch.cat((input_, context), 2), sequence_lengths, hidden, self.lstm)
+        all_hidden, final_hidden = sorted_rnn(torch.cat((input_, context), 2), 
+            sequence_lengths, hidden, self.lstm)
+
         return all_hidden, final_hidden
 
-
+# LSTM Wrapper for Luong attention
 class SingleAttention(nn.Module):
     def __init__(self, input_size, hidden_size):
         super().__init__()
@@ -271,7 +288,8 @@ class SingleAttention(nn.Module):
         context = self.attention(hidden[0].squeeze(0), attended, sequence_lengths).unsqueeze(1)
 
         sequence_length_result = torch.ones(input_.shape[0]).to(input_.device) #[batch len ones, bc all sequence 1 here!]
-        all_hidden, final_hidden = sorted_rnn(torch.cat((input_, context), 2).permute(1, 0, 2), sequence_length_result, hidden, self.lstm)
+        all_hidden, final_hidden = sorted_rnn(torch.cat((input_, context), 2).permute(1, 0, 2), 
+            sequence_length_result, hidden, self.lstm)
         return all_hidden, final_hidden
 
 
@@ -293,7 +311,7 @@ def _sort_batch_by_length(tensor, sequence_lengths):
     # Sort sequence lengths
     sorted_sequence_lengths, permutation_index = sequence_lengths.sort(0, descending=True)
     # Sort sequences
-    sorted_tensor = tensor.index_select(0, permutation_index)
+    sorted_tensor = tensor.index_select(1, permutation_index)
     # Find indices to recover the original order
     index_range = sequence_lengths.data.clone().copy_(torch.arange(0, len(sequence_lengths))).long()
     _, reverse_mapping = permutation_index.sort(0, descending=False)
@@ -306,19 +324,17 @@ def sorted_rnn(sequences, sequence_lengths, hidden, rnn):
     Sorts and packs inputs, then feeds them into RNN.
 
     Args:
-        sequences: Input sequences, [batch_size, len, dim].
+        sequences: Input sequences, [len, batch_size, dim].
         sequence_lengths: Lengths for each sequence, [batch_size].
         rnn: Registered LSTM or GRU.
 
     Returns:
-        All hidden states, [batch_size, len, hid].
+        All hidden states, [len, batch_size, hid].
     """
     # Sort input sequences
-    sequences = sequences.permute(1, 0, 2)
     sorted_inputs, sorted_sequence_lengths, restoration_indices = _sort_batch_by_length(
         sequences, sequence_lengths
     )
-    sorted_inputs = sorted_inputs.permute(1, 0, 2)
     # Pack input sequences
     packed_sequence_input = pack_padded_sequence(
         sorted_inputs,
@@ -327,15 +343,16 @@ def sorted_rnn(sequences, sequence_lengths, hidden, rnn):
 
     # Run RNN
     packed_sequence_output, final_hidden = rnn(packed_sequence_input, hidden)
+
     # Unpack hidden states
     unpacked_sequence_tensor, _ = pad_packed_sequence(
         packed_sequence_output
     )
-    unpacked_sequence_tensor = unpacked_sequence_tensor.permute(1, 0, 2)
     # Restore the original order in the batch and return all hidden states
-    return unpacked_sequence_tensor.index_select(0, restoration_indices).permute(1, 0, 2), final_hidden
+    return unpacked_sequence_tensor.index_select(1, restoration_indices), final_hidden
 
 
+# General interface for the attention LSTMs
 class AttentionLSTM(nn.Module):
     def __init__(self, attention_lstm):
         super().__init__()
@@ -354,14 +371,9 @@ class AttentionLSTM(nn.Module):
         return AttentionLSTM(AlignedAttention(input_size, hidden_size))
 
     def forward(self, sequence_batch, sequence_len, hidden=None, attended=None, mask=None):
-        # if not isinstance(sequence_batch, list):
-        #     raise ValueError(
-        #         'sequence_batch has to be a list. Instead got {}.'.format(
-        #             type(sequence_batch).__name__,
-        #         )
-        #     )
 
-        all_hidden, final_hidden = self.attention_lstm(sequence_batch, hidden, (attended, sequence_len), mask)
+        all_hidden, final_hidden = self.attention_lstm(sequence_batch, hidden,
+            (attended, sequence_len), mask)
         return all_hidden, final_hidden
 
 
