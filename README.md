@@ -51,3 +51,15 @@ This folder contains proposal and reports on the experiments
 
 ## License:
 This project is licensed under the terms of the MIT license.
+
+## Training in Colab:
+Note, this program has long training times.  To avoid disconnection from
+inactivity and take advantage of full training time, please add the following
+to the console in your colab if training remotely:
+```
+function ClickConnect(){
+	console.log("Clicking");
+	document.querySelector("colab-connect-button").click()
+}
+setInterval(ClickConnect,60000)
+```

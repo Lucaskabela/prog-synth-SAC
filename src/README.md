@@ -5,25 +5,27 @@ This file contains the code for this project, including the DSL, interpreter, mo
 ### TODO LIST
 
 
+- Implement the environment
+    
+    - Finish RL training code
+    
 - Implement the models
     
-    - Convert tokens to ops (get program with beam approach)
-    
-    - Implement Reinforce
-
-    - AC model
-
     - SAC model
-
-    - Training code for models ^^^
 
 - Run basic expirements
     
-    - Try to recreate REINFORCE results from Robustfill
-
-    - AC approach
+    - REINFORCE approach
 
     - SAC approach
+
+- Evaluation Code
+    
+    - Beam Decoder 
+
+    - Evaluation metrics (EM/F1)
+
+    - other metrics?
 
 - Bells and Whistles
     
@@ -31,4 +33,6 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
     - Command line / QOL changes
 
-    - Python Notebook for running
+    - Commenting/refactoring
+
+    - try deeper/larger models
