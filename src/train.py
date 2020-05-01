@@ -7,11 +7,11 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.tensorboard as tb
 
-from env import to_program
-from models import RobustFill
+from env import to_program, RobustFillEnv
+from models import RobustFill, ReinforceRobustFill
 from utils import sample_example
 from torch.utils.data import Dataset, DataLoader
-
+from torch.distributions.categorical import Categorical
 
 def max_program_length(expected_programs):
     return max([len(program) for program in expected_programs])
@@ -29,47 +29,63 @@ def train_reinforce(args, policy, optimizer, env, checkpoint_filename,
             flush_secs=1)
 
     if args.continue_training:
-        reinforce_rf.load_state_dict(torch.load(
+        policy.load_state_dict(torch.load(
             path.join(path.dirname(path.abspath(__file__)), checkpoint_filename))
         )
     
-    def select_action(state):
-        probs = policy(state)
+    def select_action(inp, hidden, output_all_hidden, out_len, num_examples):
+        program_embedding, hidden = policy.predict_next(inp, hidden, 
+            output_all_hidden, out_len, num_examples)
+        probs = F.softmax(program_embedding, dim=1).squeeze(0)
         m = Categorical(probs)
         action = m.sample()
         policy.saved_log_probs.append(m.log_prob(action))
-        return action.item()
+        return action.item(), program_embedding, hidden
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    reinforce_rf.set_device(device)
-    reinforce_rf = reinforce_rf.to(device)
-    reinforce_rf.train()
+    policy.set_device(device)
+    policy = policy.to(device)
+    policy.train()
     global_iter = 0
+    num_examples = 4
+    running_reward = 0
    
     # Get an minibatch by interacting with the environment
-
+    # no limit on performance: keep interacting with env!
+    while True:
     # Train from the results of the minibatch
-    for i_episode in count(1):
-        state, ep_reward = env.reset(), 0
-        for t in range(1, 10000):  # Don't infinite loop while learning
-            action = select_action(state)
-            state, reward, done, _ = env.step(action)
-            policy.rewards.append(reward)
-            ep_reward += reward
-            if done:
+        
+        for i_episode in range(args.batch_size):
+            state, ep_reward = env.reset(), 0
+            output_all_hidden, hidden, out_len = policy.encode_io(state)
+            # initial input is zero vector
+            decoder_input = torch.stack([torch.zeros(1, policy.program_size) for _ in range(hidden[0].size()[1])])
+            decoder_input = decoder_input.to(hidden[0].device)
+
+            # here we should decide to use teacher or not - take trg and make a one-hot encoding
+            done=False
+            while not done: # not end of sequence yet
+                action, program_embedding, hidden = select_action(decoder_input, 
+                    hidden, output_all_hidden, out_len, num_examples)
+                state, reward, done, _ = env.step(action)
+                policy.rewards.append(reward)
+                ep_reward += reward
+                decoder_input = torch.stack([F.softmax(p, dim=1) 
+                    for p in program_embedding.split(1) for _ in range(num_examples)])
+
+            if (ep_reward > 0):
+                print("I did it yay!!!!")
+            running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
+            finish_episode(policy, optimizer)
+            if i_episode % args.checkpoint_step_size == 0:
+                print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
+                      i_episode, ep_reward, running_reward))
+            if running_reward > .995:
+                print("Solved! Running reward is now {} and "
+                      "the last episode runs to {} time steps!".format(running_reward, t))
                 break
 
-        running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
-        finish_episode(policy, gamma)
-        if i_episode % args.log_interval == 0:
-            print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
-                  i_episode, ep_reward, running_reward))
-        if running_reward > env.spec.reward_threshold:
-            print("Solved! Running reward is now {} and "
-                  "the last episode runs to {} time steps!".format(running_reward, t))
-            break
-
-def finish_episode(policy, optimizer, gamma=.95):
+def finish_episode(policy, optimizer, eps=1, gamma=.95):
     R = 0
     policy_loss = []
     returns = []
@@ -80,8 +96,9 @@ def finish_episode(policy, optimizer, gamma=.95):
     returns = (returns - returns.mean()) / (returns.std() + eps)
     for log_prob, R in zip(policy.saved_log_probs, returns):
         policy_loss.append(-log_prob * R)
+
     optimizer.zero_grad()
-    policy_loss = torch.cat(policy_loss).sum()
+    policy_loss = torch.stack(policy_loss).sum()
     policy_loss.backward()
     optimizer.step()
     del policy.rewards[:]
@@ -278,10 +295,31 @@ def train_full(args):
     )
 
 
+def train_rl(args):
+    token_tables = op.build_token_tables()
+    robust_fill = ReinforceRobustFill(string_size=len(op.CHARACTER), 
+        string_embedding_size=args.embedding_size, hidden_size=args.hidden_size, 
+        program_size=len(token_tables.op_token_table),
+    )
+
+    if (args.optimizer == 'sgd'):
+        optimizer = optim.SGD(robust_fill.parameters(), lr=args.lr)
+    else:
+        optimizer = optim.Adam(robust_fill.parameters(), lr=args.lr)
+
+    env = RobustFillEnv()
+    train_reinforce(args, policy=robust_fill, optimizer=optimizer, 
+        env=env, 
+        checkpoint_filename=args.checkpoint_filename,
+        checkpoint_step_size=args.checkpoint_step_size, 
+        checkpoint_print_tensors=args.print_tensors,
+    )
 # run gives passable argparser interface, no random seed!
 def run(args):
     train_full(args)
 
+def run_rl(args):
+    train_rl(args)
 
 def main():
     parser = argparse.ArgumentParser(description='Train RobustFill.')
@@ -297,11 +335,15 @@ def main():
     parser.add_argument('--optimizer', default='adam')
     parser.add_argument('--grad_clip', default=.25)
     parser.add_argument('--number_progs', default=1000)
+    parser.add_argument('--rl', action='store_true')
     args = parser.parse_args()
 
     torch.manual_seed(1337)
     random.seed(420)
-    train_full(args)
+    if (args.rl):
+        train_rl(args)
+    else:
+        train_full(args)
 
 
 if __name__ == '__main__':

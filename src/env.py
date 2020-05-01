@@ -27,24 +27,31 @@ class RobustFillEnv():
         if (self.user_prog[-1] == self.EOS):
             reward = 0
             # all or nothing rn, can modify later.
-            if (num.consistent(self.refernce_prog, self.user_prog) == len(reference_prog[1])):
+            if (num_consistent(self.reference_prog, self.user_prog) == len(self.reference_prog[1])):
                 reward = 1
             old_prog = self.reference_prog[0]
 
             i_o = self.reset()
             return i_o, reward, True, {'reference_prog' : old_prog} 
+        elif(len(self.user_prog) > 25):
+            # User aint gonna get it if already on char 25..
+            old_prog = self.reference_prog[0]
+
+            i_o = self.reset()
+            return i_o, 0, True, {'reference_prog' : old_prog} 
+
         else:
             # If not end of sequnce, return 0
-            return self.refernce_prog[1], 0, False, None
+            return [self.reference_prog[1]], 0, False, None
     
     # Reset resets the environment to the initial state, returning the first state
     def reset(self):
         self.user_prog = []
-        self.reference_prog = self.sample()
-        return self.reference_prog[1] # return the i/o strings only
+        self.reference_prog = self._sample()
+        return [self.reference_prog[1]] # return the i/o strings only
 
     def _sample(self):
-        example = sample_example(self.max_exp, self.max_characters)
+        example = sample_example(self.max_expressions, self.max_characters)
         program = example.program.to_tokens(self.token_tables.op_token_table)
         strings = [
             (op.tokenize_string(input_, self.token_tables.string_token_table),
@@ -54,7 +61,7 @@ class RobustFillEnv():
         return (program, strings)
 
 
-def consistent(reference_prog, user_prog):
+def num_consistent(reference_prog, user_prog):
     num_consistent = 0
     examples, expected = reference_prog
     try:

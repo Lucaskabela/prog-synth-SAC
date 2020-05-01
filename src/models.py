@@ -14,6 +14,7 @@ class ReinforceRobustFill(nn.Module):
         # set the device of this robustfill model and size of chacters in string setting
         self.device = device
         self.string_size = string_size
+        self.program_size = program_size
 
         # converts character_ngrams to string embeddings, add 1 for padding char
         self.embedding = nn.Embedding(self.string_size + 1, string_embedding_size)
@@ -85,10 +86,9 @@ class ReinforceRobustFill(nn.Module):
 
         return output_all_hidden, hidden, output_length
 
-    def predict_next(self, inp, output_all_hidden, hidden, output_length, num_examples=4):
-
-        program_embedding, _, hidden = self.single_step_forward(inp, hidden, 
-            output_all_hidden, out_len, num_examples)
+    def predict_next(self, inp, hidden, output_all_hidden, output_length, num_examples=4):
+        program_embedding, _, hidden = self.program_decoder.single_step_forward(inp, hidden, 
+            output_all_hidden, output_length, num_examples)
 
         return program_embedding, hidden 
 
@@ -107,7 +107,7 @@ class ReinforceRobustFill(nn.Module):
         pred = -1
         predicted = []
         while pred != 0:
-            program_embedding, hidden = self.single_step_forward(decoder_input, 
+            program_embedding, hidden = self.predict_next(decoder_input, 
                 hidden, output_all_hidden, out_len, num_examples)
 
             pred = torch.argmax(program_embedding.squeeze(0))
