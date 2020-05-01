@@ -7,6 +7,114 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 
+class ReinforceRobustFill(nn.Module):
+    def __init__(self, string_size, string_embedding_size, hidden_size, program_size, device='cpu'):
+        super().__init__()
+
+        # set the device of this robustfill model and size of chacters in string setting
+        self.device = device
+        self.string_size = string_size
+
+        # converts character_ngrams to string embeddings, add 1 for padding char
+        self.embedding = nn.Embedding(self.string_size + 1, string_embedding_size)
+        nn.init.uniform_(self.embedding.weight, -.1, .1)
+
+        # input encoder uses lstm to embed input
+        self.input_encoder = AttentionLSTM.lstm(input_size=string_embedding_size, 
+            hidden_size=hidden_size)
+
+        # output encoder with attention, default to aligned attention 
+        # computed over input_encoder's hidden
+        self.output_encoder = AttentionLSTM.aligned_attention(
+            input_size=string_embedding_size,
+            hidden_size=hidden_size,
+        )
+
+        # program decoder, computes attention over output_encoder hidden.
+        self.program_decoder = ProgramDecoder(hidden_size=hidden_size, 
+            program_size=program_size)
+
+    def set_device(self, device):
+        self.device = device
+    
+    # ensures all programs in batch have same number examples
+    @staticmethod
+    def _check_num_examples(batch):
+        assert len(batch) > 0
+        num_examples = len(batch[0])
+        assert all([len(examples) == num_examples for examples in batch])
+        return num_examples
+
+    # seperates i/o into two different list
+    def _split_flatten_examples(self, batch):
+        input_batch = [torch.tensor(input_sequence, device=self.device, dtype=torch.long) 
+            for examples in batch for input_sequence, _ in examples]
+        output_batch = [torch.tensor(output_sequence, device=self.device, dtype=torch.long) 
+            for examples in batch for _, output_sequence in examples]
+        return input_batch, output_batch
+
+    def _embed_batch(self, batch):
+        return self.embedding(batch)
+
+    def encode_io(self, batch):
+        num_examples = RobustFill._check_num_examples(batch)
+        input_batch, output_batch = self._split_flatten_examples(batch)
+
+        # pad the two tensor, mask, then compute the sequnce lengths
+        p_input_batch = pad_sequence(input_batch, batch_first=False, 
+            padding_value=self.string_size)
+        p_output_batch = pad_sequence(output_batch, batch_first=False, 
+            padding_value=self.string_size)
+        p_mask = (p_input_batch == self.string_size)
+
+        input_length = torch.tensor([i.shape[0] for i in input_batch], 
+            dtype=torch.long, device=self.device)
+        output_length = torch.tensor([o.shape[0] for o in output_batch], 
+            dtype=torch.long, device=self.device)
+
+        # embed batches, 
+        input_batch = self._embed_batch(p_input_batch)
+        output_batch = self._embed_batch(p_output_batch)
+
+        input_all_hidden, hidden = self.input_encoder(input_batch, input_length, None, None)
+        output_all_hidden, hidden = self.output_encoder(output_batch, output_length, hidden=hidden, attended=input_all_hidden, mask=p_mask)
+
+        return output_all_hidden, hidden, output_length
+
+    def predict_next(self, inp, output_all_hidden, hidden, output_length, num_examples=4):
+
+        program_embedding, _, hidden = self.single_step_forward(inp, hidden, 
+            output_all_hidden, out_len, num_examples)
+
+        return program_embedding, hidden 
+
+    # Expects:
+    # list (batch_size) of tuples (input, output) of list (sequence_length) of token indices
+    def forward(self, batch):
+        num_examples=4
+        output_all_hidden, hidden, out_len = self.encode_io(batch)
+        program_sequence = []
+
+        # initial input is zero vector
+        decoder_input = torch.stack([torch.zeros(1, self.program_size) for _ in range(hidden[0].size()[1])])
+        decoder_input = decoder_input.to(hidden[0].device)
+
+        # here we should decide to use teacher or not - take trg and make a one-hot encoding
+        pred = -1
+        predicted = []
+        while pred != 0:
+            program_embedding, hidden = self.single_step_forward(decoder_input, 
+                hidden, output_all_hidden, out_len, num_examples)
+
+            pred = torch.argmax(program_embedding.squeeze(0))
+            predicted.append(pred)
+            program_sequence.append(program_embedding.unsqueeze(0))
+            decoder_input = torch.stack([F.softmax(p, dim=1) 
+                for p in program_embedding.split(1) for _ in range(num_examples)])
+
+        return torch.cat(program_sequence), predicted
+
+
 class RobustFill(nn.Module):
     def __init__( self, string_size, string_embedding_size, hidden_size, program_size, device='cpu'):
         super().__init__()

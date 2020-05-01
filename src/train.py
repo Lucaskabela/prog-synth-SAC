@@ -17,6 +17,34 @@ def max_program_length(expected_programs):
     return max([len(program) for program in expected_programs])
 
 
+def train_reinforce(args, reinforce_rf, optimizer, env, checkpoint_filename,
+    checkpoint_step_size, checkpoint_print_tensors):
+    
+
+    # Get logger if available!
+    from os import path
+    train_logger = None
+    if args.log_dir is not None:
+        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'),
+            flush_secs=1)
+
+    if args.continue_training:
+        reinforce_rf.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), checkpoint_filename))
+        )
+
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    reinforce_rf.set_device(device)
+    reinforce_rf = reinforce_rf.to(device)
+    reinforce_rf.train()
+    global_iter = 0
+   
+    # Get an minibatch by interacting with the environment
+
+    # Train from the results of the minibatch
+
+
+    
 def train(args, robust_fill, optimizer, dataloader, checkpoint_filename, 
         checkpoint_step_size, checkpoint_print_tensors):
 
