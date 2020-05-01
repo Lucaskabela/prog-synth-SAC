@@ -17,7 +17,7 @@ def max_program_length(expected_programs):
     return max([len(program) for program in expected_programs])
 
 
-def train_reinforce(args, reinforce_rf, optimizer, env, checkpoint_filename,
+def train_reinforce(args, policy, optimizer, env, checkpoint_filename,
     checkpoint_step_size, checkpoint_print_tensors):
     
 
@@ -32,6 +32,13 @@ def train_reinforce(args, reinforce_rf, optimizer, env, checkpoint_filename,
         reinforce_rf.load_state_dict(torch.load(
             path.join(path.dirname(path.abspath(__file__)), checkpoint_filename))
         )
+    
+    def select_action(state):
+        probs = policy(state)
+        m = Categorical(probs)
+        action = m.sample()
+        policy.saved_log_probs.append(m.log_prob(action))
+        return action.item()
 
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     reinforce_rf.set_device(device)
@@ -42,7 +49,43 @@ def train_reinforce(args, reinforce_rf, optimizer, env, checkpoint_filename,
     # Get an minibatch by interacting with the environment
 
     # Train from the results of the minibatch
+    for i_episode in count(1):
+        state, ep_reward = env.reset(), 0
+        for t in range(1, 10000):  # Don't infinite loop while learning
+            action = select_action(state)
+            state, reward, done, _ = env.step(action)
+            policy.rewards.append(reward)
+            ep_reward += reward
+            if done:
+                break
 
+        running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
+        finish_episode(policy, gamma)
+        if i_episode % args.log_interval == 0:
+            print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
+                  i_episode, ep_reward, running_reward))
+        if running_reward > env.spec.reward_threshold:
+            print("Solved! Running reward is now {} and "
+                  "the last episode runs to {} time steps!".format(running_reward, t))
+            break
+
+def finish_episode(policy, optimizer, gamma=.95):
+    R = 0
+    policy_loss = []
+    returns = []
+    for r in policy.rewards[::-1]:
+        R = r + gamma * R
+        returns.insert(0, R)
+    returns = torch.tensor(returns).to(policy.device)
+    returns = (returns - returns.mean()) / (returns.std() + eps)
+    for log_prob, R in zip(policy.saved_log_probs, returns):
+        policy_loss.append(-log_prob * R)
+    optimizer.zero_grad()
+    policy_loss = torch.cat(policy_loss).sum()
+    policy_loss.backward()
+    optimizer.step()
+    del policy.rewards[:]
+    del policy.saved_log_probs[:]
 
     
 def train(args, robust_fill, optimizer, dataloader, checkpoint_filename, 

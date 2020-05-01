@@ -34,6 +34,10 @@ class ReinforceRobustFill(nn.Module):
         self.program_decoder = ProgramDecoder(hidden_size=hidden_size, 
             program_size=program_size)
 
+        self.saved_log_probs = []
+        self.rewards = []
+
+        
     def set_device(self, device):
         self.device = device
     

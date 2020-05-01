@@ -7,27 +7,25 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
 - Implement the environment
     
-    - Basic MDP : All or nothing (consistency)
-
-        - reward fn, step, etc.
-
-    - Implement training loop for RL (get observation, etc)
-
+    - Finish RL training code
+    
 - Implement the models
     
-    - Implement Reinforce
-
-    - AC model
-
     - SAC model
 
 - Run basic expirements
     
-    - Try to recreate results from Robustfill
-
     - REINFORCE approach
 
     - SAC approach
+
+- Evaluation Code
+    
+    - Beam Decoder 
+
+    - Evaluation metrics (EM/F1)
+
+    - other metrics?
 
 - Bells and Whistles
     
