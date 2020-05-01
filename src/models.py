@@ -121,7 +121,7 @@ class ProgramDecoder(nn.Module):
         decoder_input = decoder_input.to(hidden[0].device)
 
         ## For teacher learning, first iter, make blank
-        correct_onehot = torch.zeros(hidden[0].shape[1], self.program_size)
+        correct_onehot = torch.zeros(hidden[0].shape[1], self.program_size).to(hidden[0].device)
 
         # here we should decide to use teacher or not - take trg and make a one-hot encoding
         for i in range(tgt_progs.shape[1]):

@@ -10,51 +10,75 @@ from utils import sample_example
 # based on consistency with the examples observed
 class RobustFillEnv():
 
-    def __init__(self, max_expressions=3, max_characters=50):
+    def __init__(self, max_expressions=3, max_characters=50, EOS=0):
         self.max_expressions = max_expressions
         self.max_characters = max_characters
         self.token_tables = op.build_token_tables()
         self.reference_prog = None
         self.examples = None
-
+        self.user_prog = []
+        self.EOS = EOS
 
     # Step takes an action from the agent, and returns
     # next_state, reward, done, info
     def step(self, action):
-        # check action == reference_prog
 
-        # example = sample_example(max_expressions=max_expressions, max_characters=max_characters)
-        #program = example.program.to_tokens(token_tables.op_token_table)
-        #strings = [
-        #    (op.tokenize_string(input_, token_tables.string_token_table),
-        #     op.tokenize_string(output, token_tables.string_token_table))
-        #    for input_, output in example.strings
-        #]
-        reward = 0
-        if (action == reference_prog[0]):
-            reward = 1
+        self.user_prog.append(action)
+        if (self.user_prog[-1] == self.EOS):
+            reward = 0
+            # all or nothing rn, can modify later.
+            if (num.consistent(self.refernce_prog, self.user_prog) == len(reference_prog[1])):
+                reward = 1
+            old_prog = self.reference_prog[0]
 
-        done = False
-        info = None
-        self.reference_prog = sample(self.token_tables, -1, self.max_expressions, self.max_characters)
-        return self.reference_prog[1], reward, reference_prog # return the i/o strings only
+            i_o = self.reset()
+            return i_o, reward, True, {'reference_prog' : old_prog} 
+        else:
+            # If not end of sequnce, return 0
+            return self.refernce_prog[1], 0, False, None
     
     # Reset resets the environment to the initial state, returning the first state
     def reset(self):
-        self.reference_prog = sample(self.token_tables, -1, self.max_expressions, self.max_characters)
+        self.user_prog = []
+        self.reference_prog = self.sample()
         return self.reference_prog[1] # return the i/o strings only
 
-def sample(token_tables, max_expressions, max_characters):
+    def _sample(self):
+        example = sample_example(self.max_exp, self.max_characters)
+        program = example.program.to_tokens(self.token_tables.op_token_table)
+        strings = [
+            (op.tokenize_string(input_, self.token_tables.string_token_table),
+             op.tokenize_string(output, self.token_tables.string_token_table))
+            for input_, output in example.strings
+        ]
+        return (program, strings)
 
-    example = sample_example(max_expressions=max_expressions, max_characters=max_characters)
-    program = example.program.to_tokens(token_tables.op_token_table)
-    strings = [
-        (op.tokenize_string(input_, token_tables.string_token_table),
-         op.tokenize_string(output, token_tables.string_token_table))
-        for input_, output in example.strings
-    ]
-    return program, strings
 
+def consistent(reference_prog, user_prog):
+    num_consistent = 0
+    examples, expected = reference_prog
+    try:
+        ref = to_program(expected)
+    except Exception:
+        assert(False, "Reference program should not error")
+
+    try:
+        user = to_program(user_prog)
+    except Exception:
+        # include logging here
+        return -1 # program was unparsable bro, wtf
+
+    for i, o in examples:
+        ref_res = ref.eval(i)
+        assert(ref_res == o)
+        try:
+            user_res = user.eval(o)
+        except Exception:
+            continue # If user prog fails on some string, not consistent, move on\
+
+        if (ref_res == user_res):
+            num_consistent += 1
+    return num_consistent
 
 # Should this be in the utils???
 def to_program(tokens, token_op_table):

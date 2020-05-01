@@ -5,9 +5,15 @@ This file contains the code for this project, including the DSL, interpreter, mo
 ### TODO LIST
 
 
-- Implement the models
+- Implement the environment
     
-    - Convert tokens to ops (get program with beam approach)
+    - Basic MDP : All or nothing (consistency)
+
+        - reward fn, step, etc.
+
+    - Implement training loop for RL (get observation, etc)
+
+- Implement the models
     
     - Implement Reinforce
 
@@ -15,13 +21,11 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
     - SAC model
 
-    - Training code for models ^^^
-
 - Run basic expirements
     
-    - Try to recreate REINFORCE results from Robustfill
+    - Try to recreate results from Robustfill
 
-    - AC approach
+    - REINFORCE approach
 
     - SAC approach
 
@@ -31,4 +35,6 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
     - Command line / QOL changes
 
-    - Python Notebook for running
+    - Commenting/refactoring
+
+    - try deeper/larger models
