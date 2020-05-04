@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.tensorboard as tb
 import numpy as np
+import copy
 
 from env import to_program, RobustFillEnv, num_consistent
 from models import RobustFill, ValueNetwork, SoftQNetwork
@@ -460,21 +461,24 @@ def sample(token_tables, max_expressions=3, max_characters=50):
     return (program, strings)
 
 
-def eval(model, token_tables, num_samples=1000, beam_size=1, em=True):
+def eval(model, token_tables, num_samples=200, beam_size=100, em=True):
     model.eval()
     num_match = 0
-    for _ in range(num_samples):
+    print("Evaluatng Examples...")
+    for idx in range(num_samples):
+        if (idx % 10 == 0):
+            print("On example {}".format(idx))
         expected_programs, examples = sample(token_tables)
-        max_len = len(expected_programs[0] + 5) # do not allow generating progams longer than max_len! 
+        max_len = len(expected_programs) + 5 # do not allow generating progams longer than max_len! 
         beam = Beam(beam_size)
         res_beam = Beam(beam_size)
         # Elements in beam are tuples ([sequence], output_all_hidden, hidden)
         # Scores are log probs.  Start with SOS, 
-        output_all_hidden, hidden = model.encode_io(examples)
+        output_all_hidden, hidden = model.encode_io([examples])
         beam.add(([model.program_size], output_all_hidden, hidden), 0)
         iteration = 0
-        while (iteration < max_len):
-            next_beam = Beam(beam_size)     
+        while (len(beam) > 0 and iteration < max_len):
+            next_beam = Beam(beam_size)  
             for elt, score in beam.get_elts_and_scores():
                 sequence, output_all_hidden, hidden = elt
                 inp_idx = sequence[-1]
@@ -483,19 +487,21 @@ def eval(model, token_tables, num_samples=1000, beam_size=1, em=True):
                 ]
                 probs, output_all_hidden, hidden = model.next_probs(decoder_input, hidden, output_all_hidden)
                 probs = F.log_softmax(probs.squeeze(0), dim=-1)
-                scored, idx = torch.topk(probs, dim=-1)
+                scored, idx = torch.topk(probs, dim=-1, k=beam_size)
                 for next_score, next_idx in zip(scored, idx):
                     if (next_idx == 0): #EOS!
                         next_sequence = copy.deepcopy(sequence)
-                        next_sequence.append(next_idx)
+                        next_sequence.append(next_idx.item())
                         res_beam.add(next_sequence, score + next_score)
                     else:
                         next_sequence = copy.deepcopy(sequence)
-                        next_sequence.append(next_idx)
+                        next_sequence.append(next_idx.item())
                         next_beam.add((next_sequence, output_all_hidden, hidden), score + next_score)
                 beam = next_beam
+            iteration+=1
 
         for sequence, _ in res_beam.get_elts_and_scores():
+            sequence = sequence[1:]
             if em:
                 if (sequence == expected_programs):
                     num_match+=1
@@ -522,15 +528,18 @@ def run_sac(args):
 def run_eval(args):
     token_tables = op.build_token_tables()
     model = RobustFill(string_size=len(op.CHARACTER), 
-        string_embedding_size=args.embedding_size, hidden_size=args.hidden_size, 
+        string_embedding_size=args.embedding_size, decoder_inp_size=128,
+        hidden_size=args.hidden_size, 
         program_size=len(token_tables.op_token_table),
     )
+    from os import path
     if args.continue_training:
         model.load_state_dict(torch.load(
-            path.join(path.dirname(path.abspath(__file__)), checkpoint_filename))
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=torch.device('cpu'))
         )
 
-    eval_em(model, token_tables)
+    eval(model, token_tables)
 
 def main():
     parser = argparse.ArgumentParser(description='Train RobustFill.')
@@ -539,7 +548,7 @@ def main():
     parser.add_argument('--lr', default=1e-3)
     parser.add_argument('--hidden_size', default=512)
     parser.add_argument('--batch_size', default=8)
-    parser.add_argument('--embedding_size', default=128)
+    parser.add_argument('--embedding_size', default=64)
     parser.add_argument('--checkpoint_filename', default='./checkpoint.pth')
     parser.add_argument('--checkpoint_step_size', default=8)
     parser.add_argument('--print_tensors', default=True)
