@@ -4,29 +4,23 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
 ### TODO LIST
 
+--- MONDAY ---
 
-- Implement the models
-    
-    - Base model from Robsutfill / Reinforce
+- Perform experiments on code
 
-    - AC model (LSTM and GRU approach)
+- Bug Fixes
 
-    - SAC model
+- Fill in significant portions of the writeup
 
-    - Training code for models ^^^
+- Write some unit test type stuff
 
-- Run basic expirements
-    
-    - Try to recreate REINFORCE results from Robustfill
+- Add more cmd line interactions
 
-    - AC approach
 
-    - SAC approach
+--- TUESDAY ---
 
-- Bells and Whistles
-    
-    - Implement replay buffer / other techniques for sparse reward handling
+- Refactor Code (clean things up a bit)
 
-    - Command line / QOL changes
+- Finish any lingering experiments
 
-    - Python Notebook for running
+- Draw conclusions 

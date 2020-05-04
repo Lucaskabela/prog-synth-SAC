@@ -32,7 +32,9 @@ This file defines the DSL for this project
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from enum import Enum
+from functools import reduce
 from string import printable, whitespace
+import re
 
 #########################################
 ######## ABSTRACT CLASS / DESIGN# #######
@@ -47,8 +49,11 @@ class DSL(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def __repr__(self):
+    def to_string(self, indent, tab):
         raise NotImplementedError
+
+    def __repr__(self):
+        return self.to_string(indent=0, tab=4)
 
     @abstractmethod
     def to_tokens(self, op_token_table):
@@ -503,7 +508,7 @@ def build_token_tables():
     for type_ in Type:
         token_op_table.append(type_)
 
-    for case in op.CASE:
+    for case in CASE:
         token_op_table.append(case)
 
     for boundary in BOUNDARY:
