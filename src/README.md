@@ -6,9 +6,7 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
 --- MONDAY ---
 
-- Perform experiments on code
-
-- Bug Fixes
+- Refactor Code (clean things up a bit)
 
 - Fill in significant portions of the writeup
 
@@ -19,7 +17,9 @@ This file contains the code for this project, including the DSL, interpreter, mo
 
 --- TUESDAY ---
 
-- Refactor Code (clean things up a bit)
+- Perform experiments on code
+
+- Bug Fixes
 
 - Finish any lingering experiments
 

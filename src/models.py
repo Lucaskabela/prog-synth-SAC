@@ -7,63 +7,62 @@ import torch.nn as nn
 import torch.nn.functional as F
 import random
 from torch.distributions.categorical import Categorical
-
+from utils import GumbelSoftmax
+import numpy as np
 
 class ValueNetwork(nn.Module):
-    def __init__(self, state_dim, hidden_dim):
+    def __init__(self, state_dim, hidden_dim, num_examples=4, dropout=.5):
         '''
         Takes in hidden network and gives it a value!
         '''
         super(ValueNetwork, self).__init__()
         
-        self.linear1 = nn.Linear(state_dim + hidden_dim, hidden_dim)
-        self.linear2 = nn.Linear(hidden_dim, hidden_dim)
-        self.linear3 = nn.Linear(hidden_dim, 1)
-        
+        # input encoder uses lstm to embed input
+        # Note:  We assume embeddings have already been produced
+        self.seq_encoder = AttentionLSTM.lstm(input_size=state_dim, 
+            hidden_size=hidden_dim)
+        self.linear1 = nn.Linear(hidden_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, 1)
+        self.dropout = nn.Dropout(p=dropout)
+
         nn.init.xavier_normal_(self.linear1.weight, gain=nn.init.calculate_gain('relu')) 
         nn.init.constant_(self.linear1.bias, 0.0)
         nn.init.xavier_normal_(self.linear2.weight, gain=nn.init.calculate_gain('relu')) 
         nn.init.constant_(self.linear2.bias, 0.0)
-        nn.init.xavier_normal_(self.linear3.weight, gain=nn.init.calculate_gain('relu')) 
-        nn.init.constant_(self.linear3.bias, 0.0)
 
 
-    def forward(self, decoder_in, hidden):
-        decoder_in = [inp[0] for inp in decoder_in]
-        decoder_in = torch.cat(decoder_in, dim=0)
-        hidden = torch.cat([hidden[0][:, 0, :] for hidden in hidden], dim=0)
-        state = torch.cat([decoder_in, hidden], 1)
-        x = F.relu(self.linear1(state))
-        x = F.relu(self.linear2(x))
-        x = self.linear3(x)
-        return x
+    def forward(self, embedded_seq):
+        # group all examples together
+        _, hidden = self.seq_encoder(embedded_seq)
+        hidden_state = hidden[0] # Get just the hidden state
+        x = F.relu(self.dropout(self.linear1(hidden_state)))
+        x = self.linear2(x)
+        return x.view(-1)
         
         
 class SoftQNetwork(nn.Module):
-    def __init__(self, input_dim, action_dim, hidden_size):
+    def __init__(self, state_dim, action_dim, hidden_dim, num_examples=4, dropout=.5):
         super(SoftQNetwork, self).__init__()
-        
-        self.linear1 = nn.Linear(input_dim + hidden_size + 1, hidden_size)
-        self.linear2 = nn.Linear(hidden_size, hidden_size)
-        self.linear3 = nn.Linear(hidden_size, 1)
-        
+
+        self.action_space = action_dim
+        self.seq_encoder = AttentionLSTM.lstm(input_size=state_dim, 
+            hidden_size=hidden_dim)
+        self.linear1 = nn.Linear(hidden_dim + action_dim, hidden_dim)
+        self.linear2 = nn.Linear(hidden_dim, 1)
+        self.dropout = nn.Dropout(p=dropout)
+
         nn.init.xavier_normal_(self.linear1.weight, gain=nn.init.calculate_gain('relu')) 
         nn.init.constant_(self.linear1.bias, 0.0)
         nn.init.xavier_normal_(self.linear2.weight, gain=nn.init.calculate_gain('relu')) 
         nn.init.constant_(self.linear2.bias, 0.0)
-        nn.init.xavier_normal_(self.linear3.weight, gain=nn.init.calculate_gain('relu')) 
-        nn.init.constant_(self.linear3.bias, 0.0)
         
-    def forward(self, decoder_in, hidden, action):
-        decoder_in = [inp[0] for inp in decoder_in]
-        decoder_in = torch.cat(decoder_in, dim=0)
-        hidden = torch.cat([hidden[0][:, 0, :] for hidden in hidden], dim=0)
-        actions = action.unsqueeze(1).float()
-        x = torch.cat([decoder_in, hidden, actions], 1)
-        x = F.relu(self.linear1(x))
-        x = F.relu(self.linear2(x))
-        x = self.linear3(x)
-        return x
+    def forward(self, embedded_seq, action):
+        # group all examples together
+        _, hidden = self.seq_encoder(embedded_seq)
+        hidden_state = torch.cat([hidden[0].squeeze(0), action], -1)
+        x = F.relu(self.dropout(self.linear1(hidden_state)))
+        x = self.linear2(x)
+        return x.view(-1)
 
 class RobustFill(nn.Module):
     def __init__(self, string_size, string_embedding_size, decoder_inp_size, 
@@ -75,6 +74,12 @@ class RobustFill(nn.Module):
         self.device = device
         self.string_size = string_size
         self.program_size = program_size
+
+        target_entropy_ratio = .95
+        # params for SAC
+        self.target_entropy = -np.log(1.0/program_size) * target_entropy_ratio
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        self.alpha = self.log_alpha.detach().exp()
 
         # converts character_ngrams to string embeddings, add 1 for padding char
         self.embedding = nn.Embedding(self.string_size + 1, string_embedding_size)
@@ -99,7 +104,8 @@ class RobustFill(nn.Module):
 
         self.saved_log_probs = []
         self.rewards = []
-
+        self.loss_history = []
+        self.reward_history = []
         
     def set_device(self, device):
         self.device = device
@@ -111,6 +117,11 @@ class RobustFill(nn.Module):
         num_examples = len(batch[0])
         assert all([len(examples) == num_examples for examples in batch])
         return num_examples
+
+    def reset(self):
+        # Episode policy and reward history
+        self.saved_log_probs = []
+        self.rewards = []
 
     # seperates i/o into two different list
     def _split_flatten_examples(self, batch):
@@ -132,34 +143,47 @@ class RobustFill(nn.Module):
         output_all_hidden, hidden = self.output_encoder(output_batch, hidden=hidden, attended=input_all_hidden)
         return output_all_hidden, hidden
 
-    def evaluate(self, inp, hidden, output_all_hidden):
-        action = []
-        log_prob = [] 
-        for idx, i in enumerate(inp):     
-            program_embedding, _, _ = self.next_probs(i, hidden[idx], 
-                    output_all_hidden[idx])    
-            logits = F.log_softmax(program_embedding.squeeze(0), dim=-1)
-            m = Categorical(logits=logits)
-            a = m.sample()
-            action.append(a)
-            log_prob.append(m.log_prob(a))
-        return torch.tensor(action), torch.tensor(log_prob), None, None, None
+    def calc_log_prob_action(self, seq, i_os, reparam=False, num_examples=4):
+
+        output_all_hidden, hidden = self.encode_io(i_os)
+        seq_lengths = [len(s) for s in seq]
+        max_length = max(seq_lengths)
+
+        padded_seqs = torch.LongTensor([
+            [program[i] if i < len(program) else 0 for i in range(max_length)]
+            for program in seq
+        ]).to(self.device)
+
+        program_embeddings = torch.zeros([max_length, len(seq), self.program_size], dtype=torch.float, device=self.device)
+        # Run through the decoder, then go back and get one corresponding to lengths!
+        for i in range(padded_seqs.shape[1]):
+            index_input =  padded_seqs[:, i]
+            decoder_input = [self.decoder_embedding(p) for p in index_input.split(1) for _ in range(num_examples)]
+            action_probs, output_all_hidden, hidden = self.next_probs(decoder_input, hidden, output_all_hidden)
+            program_embeddings[i, :, :] = action_probs
+        program_embeddings = program_embeddings.permute(1, 0, 2)
+        action_probs = torch.stack([program_embeddings[idx, length - 1, :] for idx, length in enumerate(seq_lengths)])
+        probs = F.softmax(action_probs.squeeze(0), dim=-1)
+        action_pd = GumbelSoftmax(probs=probs, temperature=1)
+        actions = action_pd.rsample() if reparam else action_pd.sample()
+        log_probs = action_pd.log_prob(actions)
+        return log_probs, actions
+
+    def act(self, inp, hidden, output_all_hidden):
+        action_probs, _, _ = self.next_probs(inp, hidden, 
+            output_all_hidden)    
+        logits = F.log_softmax(action_probs.squeeze(0), dim=-1)
+        m = Categorical(logits=logits)
+        action = m.sample()
+        return action.cpu().squeeze()
 
     def select_action(self, inp, hidden, output_all_hidden):
-        try:
-            program_embedding, output_all_hidden, hidden = self.next_probs(inp, hidden, 
-                output_all_hidden)    
-            logits = F.log_softmax(program_embedding.squeeze(0), dim=-1)
-            m = Categorical(logits=logits)
-            action = m.sample()
-            self.saved_log_probs.append(m.log_prob(action))
-            return action.item(), program_embedding, output_all_hidden, hidden
-        except RuntimeError:
-            torch.set_printoptions(profile="full")
-            print("Got some whack stuff!")
-            print(program_embedding.squeeze(0))
-            print(logits)
-            raise RuntimeError()
+        action_probs, out_all, hidden = self.next_probs(inp, hidden, 
+            output_all_hidden)    
+        logits = F.log_softmax(action_probs.squeeze(0), dim=-1)
+        m = Categorical(logits=logits)
+        action = m.sample()
+        return action.cpu().squeeze(), m.log_prob(action), out_all, hidden
 
     def next_probs(self, inp, hidden, output_all_hidden, num_examples=4):
         program_embedding, output_all_hidden, hidden = self.program_decoder.forward(inp, hidden, 

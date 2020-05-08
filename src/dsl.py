@@ -1,7 +1,7 @@
 '''
 This file defines the DSL for this project
 
-- Concat (e1, e2, e3, ...) = Concat ( [e1] , [e2], [e3], ...)
+    - Concat (e1, e2, e3, ...) = Concat ( [e1] , [e2], [e3], ...)
 
     - ConstStr (c) = c
 
@@ -152,8 +152,7 @@ class Compose(Nesting):
                 indent, recursive=True)
 
     def to_tokens(self, op_token_table):
-        return (self.nesting.to_tokens(op_token_table)
-                + self.nesting_or_substring.to_tokens(op_token_table))
+        return [op_token_table[self.__class__]] + self.nesting.to_tokens(op_token_table) + self.nesting_or_substring.to_tokens(op_token_table)
 
 
 class ConstStr(Expression):
@@ -473,6 +472,10 @@ TokenTables = namedtuple(
 
 def tokenize_string(string, string_token_table):
     return [string_token_table[char] for char in string]
+
+def string_tokens(tokens, string_token_table):
+    token_string_table = {token: char for token, char in enumerate(string_token_table)}
+    return ''.join([token_string_table[tok] for tok in tokens])
 
 
 def build_token_tables():

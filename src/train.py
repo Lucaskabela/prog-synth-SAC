@@ -8,225 +8,250 @@ import torch.optim as optim
 import torch.utils.tensorboard as tb
 import numpy as np
 import copy
+import math
 
 from env import to_program, RobustFillEnv, num_consistent
 from models import RobustFill, ValueNetwork, SoftQNetwork
-from utils import sample_example, Beam, ReplayBuffer
+from utils import sample, sample_example, Beam, Replay_Buffer
 from torch.utils.data import Dataset, DataLoader
 
 def max_program_length(expected_programs):
     return max([len(program) for program in expected_programs])
 
-def train_sac(args, policy, value, tgt_value, q_1, q_2, policy_opt, value_opt,
-    q_1_opt, q_2_opt, replay_buffer, env, 
-    checkpoint_filename, checkpoint_step_size, checkpoint_print_tensors):
+def guard_q_actions(actions, dim):
+    '''Guard to convert actions to one-hot for input to Q-network'''
+    actions = F.one_hot(actions.long(), dim).float()
+    return actions
+
+def calculate_critic_loss(policy, q_1, q_2, tqt_q_1, tgt_q_2, states, i_os, actions, rewards, next_states, done, gamma=.99):
+    with torch.no_grad():
+
+        embed_states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device)) for state in states]
+        embed_next_states = [policy.decoder_embedding(torch.LongTensor(next_state).to(policy.device)) for next_state in next_states]
+
+        next_probs, next_actions = policy.calc_log_prob_action(next_states, i_os)
+        next_actions = guard_q_actions(next_actions, tqt_q_1.action_space)
+        next_q1 = tqt_q_1(embed_next_states, next_actions)
+        next_q2 = tgt_q_2(embed_next_states, next_actions)
+
+        min_q_next = (torch.min(next_q1, next_q2) - policy.alpha * next_probs)
+        target_q_value = rewards + (1 - done) * gamma * min_q_next
+
+    p_q1 = q_1(embed_states, actions)
+    p_q2 = q_2(embed_states, actions)
+    q_value_loss1 = F.mse_loss(p_q1, target_q_value)
+    q_value_loss2 = F.mse_loss(p_q2, target_q_value)
+    return q_value_loss1, q_value_loss2
+
+def calculate_actor_loss(policy, q_1, q_2, states, i_os):
+     # Train actor network
+    embed_states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device)) for state in states]
     
-    max_frames = 10_000_000
-    max_steps = 25
-    frame_idx = 0
-    num_examples = 4
-    batch_size = args.batch_size
-    rewards = []
-    while frame_idx < max_frames:
-        state = env.reset()
-        output_all_hidden, hidden = policy.encode_io(state)
-        episode_reward = 0
-        decoder_input = [policy.decoder_embedding(torch.tensor([policy.program_size], 
-                        device=policy.device, dtype=torch.long)) for _ in range(hidden[0].size()[1])
-        ]
-        for step in range(max_steps):
+    log_probs, actions = policy.calc_log_prob_action(states, i_os, reparam=True)
+    q1 = q_1(embed_states, actions)
+    q2 = q_2(embed_states, actions)
+    min_q = torch.min(q1, q2)
+    policy_loss = (policy.alpha * log_probs - min_q).mean()
+    return policy_loss, log_probs
 
-            action, program_embedding, output_all_hidden, next_hidden = policy.select_action(decoder_input, hidden, output_all_hidden)
-            next_state, reward, done, _ = env.step(action)
-            idx_next = [action]
-            index_input = torch.tensor(idx_next, device=policy.device, dtype=torch.long)
-            next_decoder_input = [policy.decoder_embedding(p) for p in index_input.split(1) for _ in range(num_examples)]
-            replay_buffer.push((decoder_input, hidden, output_all_hidden), action, reward, (next_decoder_input, next_hidden), done)
-            hidden = next_hidden
-            decoder_input = next_decoder_input
-            state = next_state
-            episode_reward += reward
-            frame_idx += 1
-            
-            if len(replay_buffer) > batch_size:
-                update(policy, value, tgt_value, q_1, q_2, policy_opt, value_opt, q_1_opt, q_2_opt,
-                    replay_buffer, batch_size)
-            
-            if done:
-                break
-        print("Reward: ")
-        print(episode_reward)
-        rewards.append(episode_reward)
+def calculate_entropy_tuning_loss(policy, log_pi):
+    """Calculates the loss for the entropy temperature parameter. This is only relevant if self.automatic_entropy_tuning
+    is True."""
+    alpha_loss = -(policy.log_alpha * (log_pi.detach() + policy.target_entropy)).mean()
+    return alpha_loss
 
-def update(policy, value, tgt_value, q_1, q_2, policy_opt, value_opt, q1_opt, q2_opt,
-    replay_buffer, batch_size, gamma=0.99, soft_tau=1e-2,):
-    
-    q_1obj = torch.nn.MSELoss()
-    q_2obj = torch.nn.MSELoss()
-    v_obj = torch.nn.MSELoss()
+def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, entropy_opt, soft_tau=5e-3):
+    # Soft Q networks are the problem, detach gradient?  Not sure why they are the cause
+    states, i_os, action, reward, next_states, done = replay.sample(args.batch_size)
 
-    device = policy.device
-    states, action, reward, next_states, done = replay_buffer.sample(batch_size)
-    decoder_input = [inp_ for inp_, _, _ in states]
-    hidden = [hidden for _, hidden, _ in states]
-    output_all_hidden = [output_all_hidden for _, _, output_all_hidden in states]
-    next_decoder_input = [inp_ for inp_, _ in next_states]
-    next_hidden = [hidden for _, hidden in next_states]
-    action     = torch.FloatTensor(action).to(device)
-    reward     = torch.FloatTensor(reward).unsqueeze(1).to(device)
-    done = torch.FloatTensor(np.float32(done)).unsqueeze(1).to(device)
-    new_action, log_prob, z, mean, log_std = policy.evaluate(decoder_input, hidden, output_all_hidden)
+    action = action.squeeze(1)
+    reward = reward.squeeze(1)
+    done = done.squeeze(1)
 
-    p_q1 = q_1(decoder_input, hidden, action)
-    p_q2 = q_2(decoder_input, hidden, action)
-    p_v  = value(decoder_input, hidden)
+    if not math.isnan(reward.std()):
+        reward = (reward - reward.mean()) / (reward.std() + np.finfo(np.float32).eps)
 
-    # Training Q Function
-    target_value = tgt_value(next_decoder_input, next_hidden)
-    target_q_value = reward + (1 - done) * gamma * target_value
-    q_value_loss1 = q_1obj(p_q1, target_q_value.detach())
-    q_value_loss2 = q_2obj(p_q2, target_q_value.detach())
+    action = guard_q_actions(action, q_1.action_space)
+    q_value_loss1, q_value_loss2 = calculate_critic_loss(policy, q_1, q_2, tgt_q_1, tgt_q_2,
+        states, i_os, action, reward, next_states, done) 
+    q_1_opt.zero_grad()
+    q_value_loss1.backward()
+    torch.nn.utils.clip_grad_norm_(q_1.parameters(), 5.)
+    q_1_opt.step()
+    q_2_opt.zero_grad()
+    q_value_loss2.backward()
+    torch.nn.utils.clip_grad_norm_(q_2.parameters(), 5.)
+    q_2_opt.step()  
 
-    # Note this is probably wrong
-    q1_opt.zero_grad()
-    q_value_loss1.backward(retain_graph=True)
-    q1_opt.step()
-    q2_opt.zero_grad()
-    q_value_loss2.backward(retain_graph=True)
-    q2_opt.step()  
-
-    # Training V networks
-    predicted_new_q_value = torch.min(q_1(decoder_input, hidden, new_action), q_2(decoder_input, hidden, new_action))
-    target_value_func = predicted_new_q_value - log_prob
-    value_loss = v_obj(p_v, target_value_func.detach())
-
-    value_opt.zero_grad()
-    value_loss.backward(retain_graph=True)
-    value_opt.step()
-
-    # Train actor network
-    policy_loss = (log_prob - predicted_new_q_value).mean()
+    policy_loss, log_action_probabilities = calculate_actor_loss(policy, q_1, q_2, states, i_os)
     policy_opt.zero_grad()
-    policy_loss.backward(retain_graph=True)
+    policy_loss.backward()
+    torch.nn.utils.clip_grad_norm_(policy.parameters(), 5.)
     policy_opt.step()
+
+    alpha_loss = calculate_entropy_tuning_loss(policy, log_action_probabilities) 
+    entropy_opt.zero_grad()
+    alpha_loss.backward()
+    entropy_opt.step()
     
-    # Copy parameters
-    for target_param, param in zip(tgt_value.parameters(), value.parameters()):
+    loss = q_value_loss1 + q_value_loss2 + policy_loss + alpha_loss
+    policy.alpha = policy.log_alpha.detach().exp()
+
+    for target_param, param in zip(tgt_q_1.parameters(), q_1.parameters()):
         target_param.data.copy_(
             target_param.data * (1.0 - soft_tau) + param.data * soft_tau
         )
-    print("Update succesfully!")
-
-def train_reinforce(args, policy, optimizer, env, checkpoint_filename,
-    checkpoint_step_size, checkpoint_print_tensors):
     
-
-    # Get logger if available!
-    from os import path
-    train_logger = None
-    if args.log_dir is not None:
-        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'),
-            flush_secs=1)
-
-    if args.continue_training:
-        policy.load_state_dict(torch.load(
-            path.join(path.dirname(path.abspath(__file__)), checkpoint_filename))
+    for target_param, param in zip(tgt_q_2.parameters(), q_2.parameters()):
+        target_param.data.copy_(
+            target_param.data * (1.0 - soft_tau) + param.data * soft_tau
         )
-
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    policy.set_device(device)
-    policy = policy.to(device)
-    policy.train()
-    global_iter = 0
-    num_examples = 4
-    running_reward = 0
-
-    # Get an minibatch by interacting with the environment
-    # no limit on performance: keep interacting with env!
-    while True:
-    # Train from the results of the minibatch
-        for i_episode in range(args.batch_size):
-            state, ep_reward = env.reset(), 0
-            output_all_hidden, hidden = policy.encode_io(state)
-            decoder_input = [policy.decoder_embedding(torch.tensor([policy.program_size], 
-                        device=policy.device, dtype=torch.long)) for _ in range(hidden[0].size()[1])
-            ]
-            done=False
-            while not done: # not end of sequence yet
-                try:
-                    action, program_embedding, output_all_hidden, hidden = policy.select_action(decoder_input, 
-                        hidden, output_all_hidden)
-                except RuntimeError:
-                    print("Got some whack stuff again")
-                    print("state starts off as: ")
-                    print(state)
-                    print("Decoder input: ")
-                    print(decoder_input)
-                    print("The index input was: ")
-                    print(index_input)
-                    print("Hidden is: ")
-                    print(hidden)
-                    print("The hidden from the encoding: ")
-                    print(output_all_hidden)
-                state, reward, done, _ = env.step(action)
-                policy.rewards.append(reward)
-                ep_reward += reward
-                idx_next = [action]
-                index_input = torch.tensor(idx_next, device=policy.device, dtype=torch.long)
-                decoder_input = [policy.decoder_embedding(p) for p in index_input.split(1) for _ in range(num_examples)]
-
-            if (ep_reward > 0):
-                print("I did it yay!!!!")
-            running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
-            finish_episode(policy, optimizer)
-            if i_episode % args.checkpoint_step_size == 0:
-                print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
-                      i_episode, ep_reward, running_reward))
-            if running_reward > .995:
-                print("Solved! Running reward is now {} and "
-                      "the last episode runs to {} time steps!".format(running_reward, t))
-                break
-
-def finish_episode(policy, optimizer, eps=1, gamma=.95):
-    R = 0
-    policy_loss = []
-    returns = []
-    for r in policy.rewards[::-1]:
-        R = r + gamma * R
-        returns.insert(0, R)
-    returns = torch.tensor(returns).to(policy.device)
-    for log_prob, R in zip(policy.saved_log_probs, returns):
-        policy_loss.append(-log_prob * R)
-
-    optimizer.zero_grad()
-    policy_loss = torch.stack(policy_loss).sum()
-    policy_loss.backward()
-    optimizer.step()
+    # Save and intialize episode history counters
+    policy.loss_history.append(policy_loss.item())
+    policy.reset()
     del policy.rewards[:]
     del policy.saved_log_probs[:]
 
+def train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, 
+    entropy_opt, replay_buffer, env, train_logger,
+    checkpoint_filename, checkpoint_step_size, checkpoint_print_tensors):
     
-def train(args, robust_fill, optimizer, dataloader, checkpoint_filename, 
-        checkpoint_step_size, checkpoint_print_tensors):
+    scores = []
+    global_step = 0
+    i_episode = 0
+    while True:
+        # Reset environment and record the starting state
+        (state, i_o), ep_reward = env.reset(), 0
+        output_all_hidden, hidden = policy.encode_io(i_o)
+        decoder_input = [policy.decoder_embedding(torch.tensor([state[-1]], 
+                    device=policy.device, dtype=torch.long)) for _ in range(hidden[0].size()[1])
+        ]
+        done=False
+        while not done: # not end of sequence yet
+            action, log_prob, output_all_hidden, hidden = policy.select_action(decoder_input, 
+                    hidden, output_all_hidden)
+            if (global_step < 1_000):
+                action = int(random.random() * policy.program_size)
 
-    # Get logger if available!
-    from os import path
-    train_logger = None
-    if args.log_dir is not None:
-        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'),
-            flush_secs=1)
+            (next_state, next_i_o), reward, done, _ = env.step(action)
+            replay_buffer.add_experience(state, i_o, action, reward, next_state, done)
+            state = next_state
+            i_o = next_i_o
+            policy.rewards.append(reward)
+            ep_reward += reward
+
+            decoder_input = [policy.decoder_embedding(torch.tensor([state[-1]], 
+                        device=policy.device, dtype=torch.long)) for _ in range(hidden[0].size()[1])
+            ]
+            global_step+=1
+
+            if len(replay_buffer) > 20 + args.batch_size:
+                update(args, replay_buffer, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt,
+                    entropy_opt)
+            if done:
+                break
+
+        # Calculate score to determine when the environment has been solved
+        policy.reward_history.append(ep_reward)
+
+        if i_episode % checkpoint_step_size  == 0:
+            print('Episode {}\t Reward: {:.2f}'.format(
+                i_episode, ep_reward))
+        i_episode += 1
 
 
-    if args.continue_training:
-        robust_fill.load_state_dict(torch.load(
-            path.join(path.dirname(path.abspath(__file__)), checkpoint_filename))
-        )
 
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    robust_fill.set_device(device)
-    robust_fill = robust_fill.to(device)
-    robust_fill.train()
+def update_reinforce(replay, policy, value, policy_opt, value_opt, gamma=.99):
+    R = 0
+    policy_loss = []
+    returns = []
+    for _, _, r in replay[: :-1]:
+        R = r + gamma * R
+        returns.insert(0, R)
+    returns = torch.tensor(returns).float().to(policy.device)
+    if not math.isnan(returns.std()):
+        returns = (returns - returns.mean()) / \
+        (returns.std() + np.finfo(np.float32).eps)
+
+    states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device))
+        for state, _, _ in replay]
+
+    vals = value(states)
+    with torch.no_grad():
+        advantage = returns - vals
+
+    for log_prob, R in zip(policy.saved_log_probs, advantage):
+        policy_loss.append(-log_prob * R)
+
+    policy_opt.zero_grad()
+    policy_loss = torch.stack(policy_loss).sum()
+    policy_loss.backward()
+    policy_opt.step()
+
+    value_opt.zero_grad()
+    F.mse_loss(vals, returns).backward()
+    value_opt.step()
+
+    # Save and intialize episode history counters
+    policy.loss_history.append(policy_loss.item())
+    policy.reward_history.append(np.sum(policy.rewards))
+    policy.reset()
+    del policy.rewards[:]
+    del policy.saved_log_probs[:]
+
+
+def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
+    checkpoint_filename, checkpoint_step_size, checkpoint_print_tensors):
+    
+    global_iter = 0
+    num_examples = 4
+    running_reward = 0
+    i_episode = 0
+    # Get an minibatch by interacting with the environment
+    # no limit on performance: keep interacting with env!
+    while True:
+        (state, i_o), ep_reward = env.reset(), 0
+        output_all_hidden, hidden = policy.encode_io(i_o)
+        decoder_input = [policy.decoder_embedding(torch.tensor([state[-1]], 
+                    device=policy.device, dtype=torch.long)) for _ in range(hidden[0].size()[1])
+        ]
+        replay = []
+        done=False
+        while not done: # not end of sequence yet
+            action, log_prob, output_all_hidden, hidden = policy.select_action(decoder_input, 
+                    hidden, output_all_hidden)
+
+            (next_state, i_o), reward, done, _ = env.step(action)
+            replay.append((state, action, reward))
+            state = next_state
+            policy.rewards.append(reward)
+            policy.saved_log_probs.append(log_prob)
+            ep_reward += reward
+            index_input = torch.tensor([state[-1]], device=policy.device, dtype=torch.long)
+            decoder_input = [policy.decoder_embedding(p) for p in index_input.split(1) for _ in range(num_examples)]
+            global_iter+=1
+
+
+        update_reinforce(replay, policy, value, pol_opt, value_opt)
+
+        running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
+        if train_logger is not None:
+            train_logger.add_scalar('average reward', running_reward, i_episode)
+        if i_episode % checkpoint_step_size == 0:
+            print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
+                  i_episode, ep_reward, running_reward))
+        i_episode += 1
+        if running_reward > .995:
+            print("Solved! Running reward is now {} and "
+                  "the last episode runs to {} time steps!".format(running_reward, t))
+            break
+
+    
+def train_supervised_(args, robust_fill, optimizer, dataloader, train_logger,
+        checkpoint_filename, checkpoint_step_size, checkpoint_print_tensors):
+
     token_tables = op.build_token_tables()
+    device = robust_fill.device
     global_iter = 0
     # No number of iterartions here - just train for a real long time
     while True:
@@ -283,6 +308,7 @@ def train(args, robust_fill, optimizer, dataloader, checkpoint_filename,
             global_iter += 1
 
 
+#-------------------Debugging code, shows whats up via tensorboard---------------------#
 def print_programs(expected_programs, actual_programs, train_logger, tok_op, global_iter):
     tokens = torch.argmax(actual_programs.permute(1, 0, 2), dim=-1)
     tokens = tokens[0].tolist()
@@ -317,7 +343,7 @@ def print_programs(expected_programs, actual_programs, train_logger, tok_op, glo
         print("Actual parsed program:")
         print(prog)
 
-# Kinda an odd 
+#----------------Data Loader---------------------------#
 class RobustFillDataset(Dataset):
 
     # idea - use sample to get number of desired programs, store in a list
@@ -336,14 +362,7 @@ class RobustFillDataset(Dataset):
         return self.programs[idx]
 
     def _sample(self):
-        example = sample_example(self.max_exp, self.max_characters)
-        program = example.program.to_tokens(self.token_tables.op_token_table)
-        strings = [
-            (op.tokenize_string(input_, self.token_tables.string_token_table),
-             op.tokenize_string(output, self.token_tables.string_token_table))
-            for input_, output in example.strings
-        ]
-        return (program, strings)
+        return sample(self.token_tables, self.max_exp, self.max_characters)
 
 # a simple custom collate function, just put them into a list!
 def my_collate(batch):
@@ -367,14 +386,31 @@ def sample_full(token_tables, batch_size, max_expressions, max_characters):
     return program_batch, strings_batch
 
 
-def train_full(args):
-
+#---------------------------Training Drivers--------------------------#
+def train_supervised(args):
+    '''
+    Parse arguments and build objects for supervised training approach
+    '''
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     token_tables = op.build_token_tables()
+    from os import path
+    train_logger = None
+    if args.log_dir is not None:
+        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'),
+            flush_secs=1)
+
+    # init model
     robust_fill = RobustFill(string_size=len(op.CHARACTER), 
         string_embedding_size=args.embedding_size, decoder_inp_size=128,
         hidden_size=args.hidden_size, 
         program_size=len(token_tables.op_token_table),
     )
+    if args.continue_training:
+        robust_fill.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename))
+        )
+    robust_fill = robust_fill.to(device)
+    robust_fill.set_device(device)
 
     if (args.optimizer == 'sgd'):
         optimizer = optim.SGD(robust_fill.parameters(), lr=args.lr)
@@ -389,16 +425,77 @@ def train_full(args):
                       num_workers=4
                     )
 
-    train(args, robust_fill=robust_fill, optimizer=optimizer, 
-        dataloader=prog_dataloaer, 
+    train_supervised_(args, robust_fill=robust_fill, optimizer=optimizer, 
+        dataloader=prog_dataloaer, train_logger=train_logger,
         checkpoint_filename=args.checkpoint_filename,
         checkpoint_step_size=args.checkpoint_step_size, 
         checkpoint_print_tensors=args.print_tensors,
     )
 
 
-def train_dqn(args):
+def train_reinforce(args):
+    '''
+    Parse arguments and construct objects for training reinforce model, with no baseine
+    '''
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     token_tables = op.build_token_tables()
+
+    # initialize tensorboard for logging output
+    from os import path
+    train_logger = None
+    if args.log_dir is not None:
+        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'),
+            flush_secs=1)
+
+    # Load Models
+    policy = RobustFill(string_size=len(op.CHARACTER), 
+        string_embedding_size=args.embedding_size, decoder_inp_size=128,
+        hidden_size=args.hidden_size, 
+        program_size=len(token_tables.op_token_table),
+    )
+    if args.continue_training:
+        policy.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=device)
+        )
+    policy = policy.to(device)
+    policy.set_device(device)
+
+    value = ValueNetwork(128, args.hidden_size).to(device)
+
+    # Initialize Optimizer
+    if (args.optimizer == 'sgd'):
+        pol_opt = optim.SGD(policy.parameters(), lr=args.lr)
+        val_opt = optim.SGD(value.parameters(), lr=args.lr)
+    else:
+        pol_opt = optim.Adam(policy.parameters(), lr=args.lr)
+        val_opt = optim.Adam(value.parameters(), lr=args.lr)
+
+
+    # Load Environment
+    env = RobustFillEnv()
+    train_reinforce_(args, policy=policy, value=value, pol_opt=pol_opt, 
+        value_opt=val_opt, env=env, train_logger=train_logger,
+        checkpoint_filename=args.checkpoint_filename,
+        checkpoint_step_size=args.checkpoint_step_size, 
+        checkpoint_print_tensors=args.print_tensors,
+    )
+
+
+def train_sac(args):
+    '''
+    Parse arguments and construct objects for training reinforce model, with no baseine
+    '''
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    token_tables = op.build_token_tables()
+    # initialize tensorboard for logging output
+    from os import path
+    train_logger = None
+    if args.log_dir is not None:
+        train_logger = tb.SummaryWriter(path.join(args.log_dir, 'train'),
+            flush_secs=1)
+
+    # Load Models
     policy = RobustFill(string_size=len(op.CHARACTER), 
         string_embedding_size=args.embedding_size, decoder_inp_size=128,
         hidden_size=args.hidden_size, 
@@ -406,59 +503,64 @@ def train_dqn(args):
     )
     q_1 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size)
     q_2 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size)
-    value = ValueNetwork(128, args.hidden_size)
-    tgt_value = ValueNetwork(128, args.hidden_size)
 
+    tgt_q_1 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size).eval()
+    tgt_q_2 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size).eval()
+
+    for target_param, param in zip(tgt_q_1.parameters(), q_1.parameters()):
+        target_param.data.copy_( param.data)
+    for target_param, param in zip(tgt_q_2.parameters(), q_2.parameters()):
+        target_param.data.copy_(param.data)
+    for param in tgt_q_1.parameters():
+        param.requires_grad = False
+    for param in tgt_q_2.parameters():
+        param.requires_grad = False
+
+    if args.continue_training:
+        policy.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=device)
+        )
+
+    # Initialize optimizers
     if (args.optimizer == 'sgd'):
         policy_opt = optim.SGD(policy.parameters(), lr=args.lr)
-        val_opt = optim.SGD(value.parameters(), lr=args.lr)
         q_1_opt = optim.SGD(q_1.parameters(), lr=args.lr)
         q_2_opt = optim.SGD(q_2.parameters(), lr=args.lr)
+        entropy_opt = optim.SGD([policy.log_alpha], lr=args.lr)
     else:
         policy_opt = optim.Adam(policy.parameters(), lr=args.lr)
-        val_opt = optim.Adam(value.parameters(), lr=args.lr)
         q_1_opt = optim.Adam(q_1.parameters(), lr=args.lr)
         q_2_opt = optim.Adam(q_2.parameters(), lr=args.lr)
+        entropy_opt = optim.Adam([policy.log_alpha], lr=args.lr)
 
+
+    # Other necessary objects
     env = RobustFillEnv()
-    replay_buffer_size = 1000000
-    replay_buffer = ReplayBuffer(replay_buffer_size)
-    train_sac(args, policy, value, tgt_value, q_1, q_2, policy_opt, val_opt,
-        q_1_opt, q_2_opt, replay_buffer, env, 
+    replay_buffer_size = 1_000_000
+    replay_buffer = Replay_Buffer(replay_buffer_size, args.batch_size)
+
+    train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, 
+        entropy_opt, replay_buffer, env, train_logger,
         args.checkpoint_filename, args.checkpoint_step_size, args.print_tensors
     )
 
 
-def train_rl(args):
+def run_eval(args):
     token_tables = op.build_token_tables()
-    robust_fill = RobustFill(string_size=len(op.CHARACTER), 
+    model = RobustFill(string_size=len(op.CHARACTER), 
         string_embedding_size=args.embedding_size, decoder_inp_size=128,
         hidden_size=args.hidden_size, 
         program_size=len(token_tables.op_token_table),
     )
+    from os import path
+    if args.continue_training:
+        model.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=torch.device('cpu'))
+        )
 
-    if (args.optimizer == 'sgd'):
-        optimizer = optim.SGD(robust_fill.parameters(), lr=args.lr)
-    else:
-        optimizer = optim.Adam(robust_fill.parameters(), lr=args.lr)
-
-    env = RobustFillEnv()
-    train_reinforce(args, policy=robust_fill, optimizer=optimizer, 
-        env=env, 
-        checkpoint_filename=args.checkpoint_filename,
-        checkpoint_step_size=args.checkpoint_step_size, 
-        checkpoint_print_tensors=args.print_tensors,
-    )
-
-def sample(token_tables, max_expressions=3, max_characters=50):
-    example = sample_example(max_expressions, max_characters)
-    program = example.program.to_tokens(token_tables.op_token_table)
-    strings = [
-        (op.tokenize_string(input_, token_tables.string_token_table),
-         op.tokenize_string(output, token_tables.string_token_table))
-        for input_, output in example.strings
-    ]
-    return (program, strings)
+    eval(model, token_tables)
 
 
 def eval(model, token_tables, num_samples=200, beam_size=100, em=True):
@@ -514,32 +616,16 @@ def eval(model, token_tables, num_samples=200, beam_size=100, em=True):
     print('{}\% Accuracy!'.format((num_match/num_samples) * 100))
 
 
-
-# run gives passable argparser interface, no random seed!
+# run gives passable argparser interface for colab, no random seed!
 def run(args):
-    train_full(args)
+    train_supervised(args)
 
 def run_rl(args):
-    train_rl(args)
+    train_reinforce(args)
 
 def run_sac(args):
     train_sac(args)
 
-def run_eval(args):
-    token_tables = op.build_token_tables()
-    model = RobustFill(string_size=len(op.CHARACTER), 
-        string_embedding_size=args.embedding_size, decoder_inp_size=128,
-        hidden_size=args.hidden_size, 
-        program_size=len(token_tables.op_token_table),
-    )
-    from os import path
-    if args.continue_training:
-        model.load_state_dict(torch.load(
-            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
-            map_location=torch.device('cpu'))
-        )
-
-    eval(model, token_tables)
 
 def main():
     parser = argparse.ArgumentParser(description='Train RobustFill.')
@@ -555,21 +641,21 @@ def main():
     parser.add_argument('--optimizer', default='adam')
     parser.add_argument('--grad_clip', default=.25)
     parser.add_argument('--number_progs', default=1000)
-    parser.add_argument('--rl', action='store_true')
+    parser.add_argument('--reinforce', action='store_true')
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--sac', action='store_true')
     args = parser.parse_args()
 
     torch.manual_seed(1337)
     random.seed(420)
-    if (args.rl):
-        train_rl(args)
+    if (args.reinforce):
+        train_reinforce(args)
     elif (args.eval):
         run_eval(args)
     elif (args.sac):
-        train_dqn(args)
+        train_sac(args)
     else:
-        train_full(args)
+        train_supervised(args)
 
 if __name__ == '__main__':
     main()
