@@ -50,6 +50,9 @@ class DSL(ABC):
 
     @abstractmethod
     def to_string(self, indent, tab):
+        '''
+        convert the program to string representation, with indentation for readability
+        '''
         raise NotImplementedError
 
     def __repr__(self):
@@ -69,8 +72,10 @@ class Program(DSL):
 class Expression(DSL):
     pass
 
+
 class Substring(Expression):
     pass
+
 
 class Nesting(Expression):
     pass
@@ -86,7 +91,7 @@ class CASE(Enum):
 # Positions are [-100, 100] in strings, limited due to finite output
 POSITION = list(range(-100, 101))
 
-# Index for occurences are -5 to 5, with -5 being from the end of the string
+# Index for occurences are -5 to 5, with negative values from the end of the string
 INDEX = [-5, -4, -3, -2, -1, 1, 2, 3, 4, 5]
 
 CHARACTER = printable
@@ -135,6 +140,10 @@ class Concat(Program):
 
 
 class Compose(Nesting):
+    '''
+    Composes two operators:  A nesting, and another nesting or substring to allow for more rich
+    expressions.
+    '''
     def __init__(self, nesting, nesting_or_substring):
         self.nesting = nesting
         self.nesting_or_substring = nesting_or_substring
@@ -152,10 +161,15 @@ class Compose(Nesting):
                 indent, recursive=True)
 
     def to_tokens(self, op_token_table):
-        return [op_token_table[self.__class__]] + self.nesting.to_tokens(op_token_table) + self.nesting_or_substring.to_tokens(op_token_table)
+        sub_exp = self.nesting.to_tokens(op_token_table) + self.nesting_or_substring.to_tokens(op_token_table)
+        return [op_token_table[self.__class__]] + sub_exp
 
 
 class ConstStr(Expression):
+    '''
+    Returns the constant string (which is limited to a character in this implementaion)
+        to form words, simply concat multiple constant strings.
+    '''
     def __init__(self, string):
         self.string = string
 
@@ -170,6 +184,10 @@ class ConstStr(Expression):
 
 
 class SubStr(Substring):
+    '''
+    Returns the substring starting at pos1 and ending at pos2, both of which are ints.
+        negative values go to end of string.
+    '''
     def __init__(self, pos1, pos2):
         self.pos1 = pos1
         self.pos2 = pos2
@@ -206,6 +224,10 @@ class SubStr(Substring):
 
 
 class GetSpan(Substring):
+    '''
+    GetSpan operation will get substring starting at the index1 occurence of regex1, and include or
+    not based on bound1.  It ends at the index2 occurence of regex2, including based on bound2
+    '''
     def __init__(self, dsl_regex1, index1, bound1, dsl_regex2, index2, bound2):
         self.dsl_regex1 = dsl_regex1
         self.index1 = index1
@@ -250,6 +272,9 @@ class GetSpan(Substring):
 
 
 class GetToken(Nesting):
+    '''
+    Gets the index occurence of a token type type_
+    '''
     def __init__(self, type_, index):
         self.type_ = type_
         self.index = index
@@ -270,6 +295,9 @@ class GetToken(Nesting):
 
 
 class ToCase(Nesting):
+    '''
+    Converts the to one of the enumerated cases
+    '''
     def __init__(self, case):
         self.case = case
 
@@ -291,6 +319,9 @@ class ToCase(Nesting):
 
 
 class Replace(Nesting):
+    '''
+    Replaces all occurences of delim1 with delim2
+    '''
     def __init__(self, delim1, delim2):
         self.delim1 = delim1
         self.delim2 = delim2
@@ -306,6 +337,9 @@ class Replace(Nesting):
 
 
 class Trim(Nesting):
+    '''
+    Trims whitespace and garbage from the string
+    '''
     def eval(self, in_str):
         return in_str.strip()
 
@@ -317,6 +351,9 @@ class Trim(Nesting):
 
 
 class GetUpto(Nesting):
+    '''
+    Get all characters up to the first occurence of the regex
+    '''
     def __init__(self, dsl_regex):
         self.dsl_regex = dsl_regex
 
@@ -337,6 +374,9 @@ class GetUpto(Nesting):
 
 
 class GetFrom(Nesting):
+    '''
+    Gets all characters after the occurence of regex
+    '''
     def __init__(self, dsl_regex):
         self.dsl_regex = dsl_regex
 
@@ -357,6 +397,9 @@ class GetFrom(Nesting):
 
 
 class GetFirst(Nesting):
+    '''
+    Gets the first token of type_ starting from index.
+    '''
     def __init__(self, type_, index):
         self.type_ = type_
         self.index = index
@@ -377,6 +420,9 @@ class GetFirst(Nesting):
 
 
 class GetAll(Nesting):
+    '''
+    Gets all tokens of type_
+    '''
     def __init__(self, type_):
         self.type_ = type_
 
@@ -431,7 +477,6 @@ def regex_for_type(type_):
     if type_ == Type.DIGIT:
         return '[0-9]'
         
-    # TODO: Should this use CHARACTER?
     if type_ == Type.CHAR:
         return '[A-Za-z0-9]'
 
@@ -471,14 +516,23 @@ TokenTables = namedtuple(
 
 
 def tokenize_string(string, string_token_table):
+    '''
+    Converts string into tokens, using the string_token_table 
+    '''
     return [string_token_table[char] for char in string]
 
 def stringify_tokens(tokens, string_token_table):
+    '''
+    Converts a list of tokens into strings based on the string_token_table (flips the k, v in this table)
+    '''
     token_string_table = {token: char for token, char in enumerate(string_token_table)}
     return ''.join([token_string_table[tok] for tok in tokens])
 
 
 def build_token_tables():
+    '''
+    Constructs the token_op, op_token, and string_token tables and returns these in one named tuple
+    '''
     token_op_table = [EOS, Concat, Compose, ConstStr, SubStr,
             GetSpan, Trim]
 
