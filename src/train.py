@@ -1,4 +1,3 @@
-import argparse
 import dsl as op
 import pprint as pp
 import random
@@ -709,54 +708,3 @@ def eval(model, token_tables, num_samples=200, beam_size=10, em=True):
 
     print('{}\% Accuracy!'.format((num_match/num_samples) * 100))
 
-
-# run gives passable argparser interface for colab, no random seed!
-def run(args):
-    train_supervised(args)
-
-def run_rl(args):
-    train_reinforce(args)
-
-def run_sac(args):
-    train_sac(args)
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Train RobustFill.')
-    parser.add_argument('-c', '--continue_training', action='store_true')
-    parser.add_argument('-cp', '--continue_training_policy', action='store_true')
-    parser.add_argument('--log_dir')
-    parser.add_argument('--lr', default=1e-3)
-    parser.add_argument('--hidden_size', default=512)
-    parser.add_argument('--batch_size', default=8)
-    parser.add_argument('--embedding_size', default=64)
-
-    parser.add_argument('--checkpoint_filename', default='./checkpoint.pth')
-    parser.add_argument('--val_checkpoint_filename', default='./val_checkpoint.pth')
-    parser.add_argument('--q1_checkpoint_filename', default='./q1_checkpoint.pth')
-    parser.add_argument('--q2_checkpoint_filename', default='./q2_checkpoint.pth')
-
-    parser.add_argument('--checkpoint_step_size', default=8)
-    parser.add_argument('--print_tensors', default=True)
-    parser.add_argument('--optimizer', default='adam')
-    parser.add_argument('--grad_clip', default=.25)
-    parser.add_argument('--number_progs', default=1000)
-    parser.add_argument('--reinforce', action='store_true')
-    parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--sac', action='store_true')
-    parser.add_argument('--her', action='store_true')
-    args = parser.parse_args()
-
-    torch.manual_seed(1337)
-    random.seed(420)
-    if (args.reinforce):
-        train_reinforce(args)
-    elif (args.eval):
-        run_eval(args)
-    elif (args.sac):
-        train_sac(args)
-    else:
-        train_supervised(args)
-
-if __name__ == '__main__':
-    main()
