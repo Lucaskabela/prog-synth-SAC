@@ -1,5 +1,9 @@
 '''
-This file defines the models for the project
+This file defines the models for the project - largely based off 
+    https://github.com/yeoedward/Robust-Fill/
+
+Not the most efficent implementation, but upon trying to rewrite, I failed to reach the same
+loss, so reverted to this verion with modifications.
 '''
 from torch.nn.utils.rnn import pack_sequence, pad_sequence, pack_padded_sequence, pad_packed_sequence
 import torch
@@ -11,16 +15,14 @@ from utils import GumbelSoftmax
 import numpy as np
 
 class ValueNetwork(nn.Module):
-    def __init__(self, state_dim, hidden_dim, num_examples=4, dropout=.5):
-        '''
-        Takes in hidden network and gives it a value!
-        '''
+    '''
+    Value network takes in a user program, i/o hidden and passes through an lstm
+    to get a hidden state, which is tne used to produce a single value out.
+    '''
+    def __init__(self, state_dim, hidden_dim, num_examples=4, dropout=.05):
         super(ValueNetwork, self).__init__()
-        
-        # input encoder uses lstm to embed input
-        # Note:  We assume embeddings have already been produced
-        self.seq_encoder = AttentionLSTM.lstm(input_size=state_dim, 
-            hidden_size=hidden_dim)
+
+        self.seq_encoder = AttentionLSTM.lstm(input_size=state_dim, hidden_size=hidden_dim)
         self.linear1 = nn.Linear(hidden_dim, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, 1)
         self.dropout = nn.Dropout(p=dropout)
@@ -31,17 +33,26 @@ class ValueNetwork(nn.Module):
         nn.init.constant_(self.linear2.bias, 0.0)
 
 
-    def forward(self, embedded_seq):
-        # group all examples together
-        _, hidden = self.seq_encoder(embedded_seq)
-        hidden_state = hidden[0] # Get just the hidden state
+    def forward(self, embedded_seq, hidden):
+        '''
+        Takes the embedded user program and hidden state from i/o produced by policy network
+        and assigns a scalar score.
+
+        NOTE: embedded_seq is a list of tensors, where the list is batch size large.
+        '''
+        _, hidden_out = self.seq_encoder(embedded_seq, hidden)
+        hidden_state = hidden_out[0] 
         x = F.relu(self.dropout(self.linear1(hidden_state)))
         x = self.linear2(x)
         return x.view(-1)
         
         
 class SoftQNetwork(nn.Module):
-    def __init__(self, state_dim, action_dim, hidden_dim, num_examples=4, dropout=.5):
+    '''
+    SoftQNetwork takes in a user program, action, and i/o hidden state and determines a 
+    scalar value
+    '''
+    def __init__(self, state_dim, action_dim, hidden_dim, num_examples=4, dropout=.05):
         super(SoftQNetwork, self).__init__()
 
         self.action_space = action_dim
@@ -56,15 +67,30 @@ class SoftQNetwork(nn.Module):
         nn.init.xavier_normal_(self.linear2.weight, gain=nn.init.calculate_gain('relu')) 
         nn.init.constant_(self.linear2.bias, 0.0)
         
-    def forward(self, embedded_seq, action):
-        # group all examples together
-        _, hidden = self.seq_encoder(embedded_seq)
+    def forward(self, embedded_seq, action, hidden):
+        '''
+        Takes the embedded user program, action and hidden state from i/o produced by policy network
+        and assigns a scalar score.
+
+        NOTE: embedded_seq is a list of tensors, where the list is batch size large.
+        '''
+        _, hidden = self.seq_encoder(embedded_seq, hidden)
         hidden_state = torch.cat([hidden[0].squeeze(0), action], -1)
         x = F.relu(self.dropout(self.linear1(hidden_state)))
         x = self.linear2(x)
         return x.view(-1)
 
 class RobustFill(nn.Module):
+    '''
+    Defines the primary/policy network, which consist of:
+        2 embedding layers for embedding i/o strings and decoder sequences
+        1 Input encoder (LSTM)
+        1 Ouptut encoder (LSTM, with attention on the input encoder)
+        1 Program decoder (LSTM, with attention on output encoder)
+
+    Further, for use in REINFORCE and SAC, we have attributes such as temperature,
+        reward history, etc.
+    '''
     def __init__(self, string_size, string_embedding_size, decoder_inp_size, 
             hidden_size, program_size, device='cpu'):
 
@@ -75,16 +101,10 @@ class RobustFill(nn.Module):
         self.string_size = string_size
         self.program_size = program_size
 
-        target_entropy_ratio = .95
-        # params for SAC
-        self.target_entropy = -np.log(1.0/program_size) * target_entropy_ratio
-        self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
-        self.alpha = self.log_alpha.detach().exp()
 
         # converts character_ngrams to string embeddings, add 1 for padding char
         self.embedding = nn.Embedding(self.string_size + 1, string_embedding_size)
         nn.init.uniform_(self.embedding.weight, -.1, .1)
-
         self.decoder_embedding = nn.Embedding(program_size+1, decoder_inp_size)
         nn.init.uniform_(self.embedding.weight, -.1, .1)
 
@@ -102,11 +122,18 @@ class RobustFill(nn.Module):
         self.program_decoder = ProgramDecoder(inp_size=decoder_inp_size ,hidden_size=hidden_size, 
             program_size=program_size)
 
+        # RL attributes
         self.saved_log_probs = []
         self.rewards = []
         self.loss_history = []
         self.reward_history = []
         
+        # params for SAC
+        target_entropy_ratio = .95
+        self.target_entropy = -np.log(1.0/program_size) * target_entropy_ratio
+        self.log_alpha = torch.zeros(1, requires_grad=True, device=device)
+        self.alpha = self.log_alpha.detach().exp()
+
     def set_device(self, device):
         self.device = device
     
@@ -119,20 +146,29 @@ class RobustFill(nn.Module):
         return num_examples
 
     def reset(self):
-        # Episode policy and reward history
+        # Episode policy and reward history cleared
         self.saved_log_probs = []
         self.rewards = []
 
-    # seperates i/o into two different list
     def _split_flatten_examples(self, batch):
+        '''
+        seperates i/o into two different list
+        '''
         input_batch = [input_sequence for examples in batch for input_sequence, _ in examples]
         output_batch = [output_sequence for examples in batch for _, output_sequence in examples]
         return input_batch, output_batch
 
     def _embed_batch(self, batch):
+        '''
+        embeds a list of input or output examples into a list of tensors
+        '''
         return [self.embedding(torch.LongTensor(sequence).to(self.device)) for sequence in batch]
 
     def encode_io(self, batch):
+        '''
+        Takes batch, a list of i/o example pairs, and produces the hidden states and (hidden, cell) from
+        encoding the i/o examples
+        '''
         num_examples = RobustFill._check_num_examples(batch)
         input_batch, output_batch = self._split_flatten_examples(batch)
 
@@ -144,7 +180,10 @@ class RobustFill(nn.Module):
         return output_all_hidden, hidden
 
     def calc_log_prob_action(self, seq, i_os, reparam=False, num_examples=4):
-
+        '''
+        Takes a user program sequence, list of i/o examples and produces an action, 
+        calculating the log probability.  Makes use of the GumbelSoftmax (FOR SAC)
+        '''
         output_all_hidden, hidden = self.encode_io(i_os)
         seq_lengths = [len(s) for s in seq]
         max_length = max(seq_lengths)
@@ -170,6 +209,10 @@ class RobustFill(nn.Module):
         return log_probs, actions
 
     def act(self, inp, hidden, output_all_hidden):
+        '''
+        Returns a token (action) given the previous token, hidden state, and all hidden
+        states from the output decoder (for attention)
+        '''
         action_probs, _, _ = self.next_probs(inp, hidden, 
             output_all_hidden)    
         logits = F.log_softmax(action_probs.squeeze(0), dim=-1)
@@ -178,6 +221,9 @@ class RobustFill(nn.Module):
         return action.cpu().squeeze()
 
     def select_action(self, inp, hidden, output_all_hidden):
+        '''
+        Pretty similar to last method, but for use with REINFORCE
+        '''
         action_probs, out_all, hidden = self.next_probs(inp, hidden, 
             output_all_hidden)    
         logits = F.log_softmax(action_probs.squeeze(0), dim=-1)
@@ -186,12 +232,18 @@ class RobustFill(nn.Module):
         return action.cpu().squeeze(), m.log_prob(action), out_all, hidden
 
     def next_probs(self, inp, hidden, output_all_hidden, num_examples=4):
+        '''
+        Given the previous token, hidden and decoder hidden, produce the probabilities over
+        tokens
+        '''
         program_embedding, output_all_hidden, hidden = self.program_decoder.forward(inp, hidden, 
             output_all_hidden, num_examples)
-
         return program_embedding, output_all_hidden, hidden 
 
     def predict(self, batch, num_examples=4):
+        ''' 
+        Given a batch of i/o examples, predicts the entire output (for use with eval)
+        '''
         program = []
         output_all_hidden, hidden = self.encode_io(batch)
         # initial input is padding vector
@@ -212,7 +264,10 @@ class RobustFill(nn.Module):
         return program
 
     def forward(self, batch, tgt_progs, num_examples=4, teacher_ratio=.5):
-
+        '''
+        Given batch of i/o examples and the padded target programs for teacher learning, 
+        outputs programs.
+        '''
         program_sequence = []
         output_all_hidden, hidden = self.encode_io(batch)
         # initial input is padding vector
@@ -241,6 +296,10 @@ class RobustFill(nn.Module):
         return torch.cat(program_sequence)
 
 class ProgramDecoder(nn.Module):
+    '''
+    Inner network for the program decoder.  Contains standard lstm decoder with attention over
+    output encoder, as well as max pool over the number of i/o examples.
+    '''
     def __init__(self, inp_size, hidden_size, program_size):
         super().__init__()
         self.program_size = program_size
@@ -265,6 +324,9 @@ class ProgramDecoder(nn.Module):
 
 
 class LuongAttention(nn.Module):
+    '''
+    Attention for the network (Luong form)
+    '''
     def __init__(self, linear):
         super().__init__()
         self.linear = linear

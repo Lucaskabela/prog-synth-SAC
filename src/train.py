@@ -29,15 +29,16 @@ def calculate_critic_loss(policy, q_1, q_2, tqt_q_1, tgt_q_2, states, i_os, acti
         embed_next_states = [policy.decoder_embedding(torch.LongTensor(next_state).to(policy.device)) for next_state in next_states]
 
         next_probs, next_actions = policy.calc_log_prob_action(next_states, i_os)
+        _, hidden = policy.encode_io(i_os)
         next_actions = guard_q_actions(next_actions, tqt_q_1.action_space)
-        next_q1 = tqt_q_1(embed_next_states, next_actions)
-        next_q2 = tgt_q_2(embed_next_states, next_actions)
+        next_q1 = tqt_q_1(embed_next_states, next_actions, hidden)
+        next_q2 = tgt_q_2(embed_next_states, next_actions, hidden)
 
         min_q_next = (torch.min(next_q1, next_q2) - policy.alpha * next_probs)
         target_q_value = rewards + (1 - done) * gamma * min_q_next
 
-    p_q1 = q_1(embed_states, actions)
-    p_q2 = q_2(embed_states, actions)
+    p_q1 = q_1(embed_states, actions, hidden)
+    p_q2 = q_2(embed_states, actions, hidden)
     q_value_loss1 = F.mse_loss(p_q1, target_q_value)
     q_value_loss2 = F.mse_loss(p_q2, target_q_value)
     return q_value_loss1, q_value_loss2
@@ -47,8 +48,9 @@ def calculate_actor_loss(policy, q_1, q_2, states, i_os):
     embed_states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device)) for state in states]
     
     log_probs, actions = policy.calc_log_prob_action(states, i_os, reparam=True)
-    q1 = q_1(embed_states, actions)
-    q2 = q_2(embed_states, actions)
+    _, hidden = policy.encode_io(i_os)
+    q1 = q_1(embed_states, actions, hidden)
+    q2 = q_2(embed_states, actions, hidden)
     min_q = torch.min(q1, q2)
     policy_loss = (policy.alpha * log_probs - min_q).mean()
     return policy_loss, log_probs
@@ -208,7 +210,7 @@ def update_reinforce(replay, policy, value, policy_opt, value_opt, i_episode, ga
     R = 0
     policy_loss = []
     returns = []
-    for _, _, r in replay[: :-1]:
+    for _, _, _, r in replay[: :-1]:
         R = r + gamma * R
         returns.insert(0, R)
     returns = torch.tensor(returns).float().to(policy.device)
@@ -217,9 +219,11 @@ def update_reinforce(replay, policy, value, policy_opt, value_opt, i_episode, ga
         (returns.std() + np.finfo(np.float32).eps)
 
     states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device))
-        for state, _, _ in replay]
+        for state, _, _, _ in replay]
+    i_os = [i_o for _, i_o, _, _ in replay]
+    _, i_o_hidden = policy.encode_io(i_os)
+    vals = value(states, i_o_hidden)
 
-    vals = value(states)
     with torch.no_grad():
         advantage = returns - vals
 
@@ -271,9 +275,10 @@ def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
             action, log_prob, output_all_hidden, hidden = policy.select_action(decoder_input, 
                     hidden, output_all_hidden)
 
-            (next_state, i_o), reward, done, _ = env.step(action)
-            replay.append((state, action, reward))
+            (next_state, next_i_o), reward, done, _ = env.step(action)
+            replay.append((state, i_o[0], action, reward))
             state = next_state
+            i_o = next_i_o
             policy.rewards.append(reward)
             policy.saved_log_probs.append(log_prob)
             ep_reward += reward

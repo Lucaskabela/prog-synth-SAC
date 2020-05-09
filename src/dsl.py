@@ -27,7 +27,7 @@ This file defines the DSL for this project
 
     - Replace(delta1, delta2) = replaces regex delta1 with delta2
 
--- See https://github.com/yeoedward/Robust-Fill/blob/f8bbf7546732bc7e8412b53f0267e7c8b82e135e/operators.py
+-- See https://github.com/yeoedward/Robust-Fill/
 '''
 from abc import ABC, abstractmethod
 from collections import namedtuple
