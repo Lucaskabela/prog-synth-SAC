@@ -98,8 +98,8 @@ def num_consistent(reference_prog, user_prog, token_tables):
     # print(user)
     # print("\n")
     for i, o in examples:
-        i = op.string_tokens(i, token_tables.string_token_table)
-        o = op.string_tokens(o, token_tables.string_token_table)
+        i = op.stringify_tokens(i, token_tables.string_token_table)
+        o = op.stringify_tokens(o, token_tables.string_token_table)
         ref_res = ref.eval(i)
         assert(ref_res == o)
         try:

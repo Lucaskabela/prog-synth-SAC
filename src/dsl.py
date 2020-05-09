@@ -473,7 +473,7 @@ TokenTables = namedtuple(
 def tokenize_string(string, string_token_table):
     return [string_token_table[char] for char in string]
 
-def string_tokens(tokens, string_token_table):
+def stringify_tokens(tokens, string_token_table):
     token_string_table = {token: char for token, char in enumerate(string_token_table)}
     return ''.join([token_string_table[tok] for tok in tokens])
 

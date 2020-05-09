@@ -12,7 +12,7 @@ import math
 
 from env import to_program, RobustFillEnv, num_consistent
 from models import RobustFill, ValueNetwork, SoftQNetwork
-from utils import sample, sample_example, Beam, Replay_Buffer
+from utils import sample, sample_example, Beam, Replay_Buffer, HER
 from torch.utils.data import Dataset, DataLoader
 
 def max_program_length(expected_programs):
@@ -60,7 +60,7 @@ def calculate_entropy_tuning_loss(policy, log_pi):
     alpha_loss = -(policy.log_alpha * (log_pi.detach() + policy.target_entropy)).mean()
     return alpha_loss
 
-def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, entropy_opt, soft_tau=5e-3):
+def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, entropy_opt, i_episode, soft_tau=5e-3):
     # Soft Q networks are the problem, detach gradient?  Not sure why they are the cause
     states, i_os, action, reward, next_states, done = replay.sample(args.batch_size)
 
@@ -76,25 +76,28 @@ def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt
         states, i_os, action, reward, next_states, done) 
     q_1_opt.zero_grad()
     q_value_loss1.backward()
-    torch.nn.utils.clip_grad_norm_(q_1.parameters(), 5.)
+    torch.nn.utils.clip_grad_norm_(q_1.parameters(), .5)
     q_1_opt.step()
     q_2_opt.zero_grad()
     q_value_loss2.backward()
-    torch.nn.utils.clip_grad_norm_(q_2.parameters(), 5.)
+    torch.nn.utils.clip_grad_norm_(q_2.parameters(), .5)
     q_2_opt.step()  
 
     policy_loss, log_action_probabilities = calculate_actor_loss(policy, q_1, q_2, states, i_os)
     policy_opt.zero_grad()
-    policy_loss.backward()
-    torch.nn.utils.clip_grad_norm_(policy.parameters(), 5.)
-    policy_opt.step()
+
+    # Give q network's time to stableize
+    if i_episode > 2_500:
+        policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), .25)
+        policy_opt.step()
 
     alpha_loss = calculate_entropy_tuning_loss(policy, log_action_probabilities) 
     entropy_opt.zero_grad()
     alpha_loss.backward()
     entropy_opt.step()
     
-    loss = q_value_loss1 + q_value_loss2 + policy_loss + alpha_loss
+    loss = [policy_loss.item(), q_value_loss1.item(), q_value_loss2.item(), alpha_loss.item()]
     policy.alpha = policy.log_alpha.detach().exp()
 
     for target_param, param in zip(tgt_q_1.parameters(), q_1.parameters()):
@@ -111,14 +114,18 @@ def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt
     policy.reset()
     del policy.rewards[:]
     del policy.saved_log_probs[:]
+    return loss
 
 def train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, 
-    entropy_opt, replay_buffer, env, train_logger,
+    entropy_opt, replay_buffer, her, env, train_logger,
     checkpoint_filename, checkpoint_step_size, checkpoint_print_tensors):
     
     scores = []
     global_step = 0
     i_episode = 0
+    loss = None
+    if args.her:
+        her.reset()
     while True:
         # Reset environment and record the starting state
         (state, i_o), ep_reward = env.reset(), 0
@@ -135,6 +142,8 @@ def train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_
 
             (next_state, next_i_o), reward, done, _ = env.step(action)
             replay_buffer.add_experience(state, i_o, action, reward, next_state, done)
+            if args.her:
+                her.add_experience(state, i_o, action, reward, next_state, done)
             state = next_state
             i_o = next_i_o
             policy.rewards.append(reward)
@@ -145,23 +154,58 @@ def train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_
             ]
             global_step+=1
 
-            if len(replay_buffer) > 20 + args.batch_size:
-                update(args, replay_buffer, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt,
-                    entropy_opt)
+            if len(replay_buffer) > 1_000 + args.batch_size and global_step % 3 == 0:
+                loss = update(args, replay_buffer, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt,
+                    entropy_opt, i_episode)
             if done:
                 break
+
+        if args.her:
+            her_list = her.backward()
+            for exp in her_list:
+                replay_buffer.add_experience(*exp)
 
         # Calculate score to determine when the environment has been solved
         policy.reward_history.append(ep_reward)
 
-        if i_episode % checkpoint_step_size  == 0:
-            print('Episode {}\t Reward: {:.2f}'.format(
-                i_episode, ep_reward))
+        running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
+
+        if train_logger is not None and loss is not None:
+            train_logger.add_scalar('average reward', np.mean(policy.reward_history[-100:]), i_episode)
+            train_logger.add_scalar('policy loss', loss[0], i_episode)
+            train_logger.add_scalar('q_1 loss', loss[1], i_episode)
+            train_logger.add_scalar('q_2 loss', loss[2], i_episode)
+            train_logger.add_scalar('entropy loss', loss[3], i_episode)
+
+        if i_episode % checkpoint_step_size == 0:
+            print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
+                  i_episode, ep_reward, running_reward))
+            print('Checkpointing at batch {}'.format(global_iter))
+            print('Policy Loss: {}'.format(loss[0]))
+            print('Q_1 Loss: {}'.format(loss[1]))
+            print('Q_2 Loss: {}'.format(loss[2]))
+            print('Entropy Loss: {}'.format(loss[3]))
+
+            if checkpoint_filename is not None:
+                print('Saving policy to file {}'.format(checkpoint_filename))
+                torch.save(policy.state_dict(), args.checkpoint_filename)
+            if q1_checkpoint_filename is not None:
+                print('Saving value network to file {}'.format(args.q1_checkpoint_filename))
+                torch.save(q1.state_dict(), args.q1_checkpoint_filename)
+            if q2_checkpoint_filename is not None:
+                print('Saving value network to file {}'.format(args.q2_checkpoint_filename))
+                torch.save(q2.state_dict(), args.q2_checkpoint_filename)
+            print('Done checkpointing model')
+
         i_episode += 1
+        if running_reward > .995:
+            print("Solved! Running reward is now {} and "
+                  "the last episode runs to {} time steps!".format(running_reward, t))
+            break
 
 
 
-def update_reinforce(replay, policy, value, policy_opt, value_opt, gamma=.99):
+def update_reinforce(replay, policy, value, policy_opt, value_opt, i_episode, gamma=.99):
     R = 0
     policy_loss = []
     returns = []
@@ -183,13 +227,19 @@ def update_reinforce(replay, policy, value, policy_opt, value_opt, gamma=.99):
     for log_prob, R in zip(policy.saved_log_probs, advantage):
         policy_loss.append(-log_prob * R)
 
+
     policy_opt.zero_grad()
     policy_loss = torch.stack(policy_loss).sum()
-    policy_loss.backward()
-    policy_opt.step()
+    # Give value network time to stableize
+    if i_episode > 2_500:
+        policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(policy.parameters(), .25)
+        policy_opt.step()
 
     value_opt.zero_grad()
-    F.mse_loss(vals, returns).backward()
+    val_loss = F.mse_loss(vals, returns)
+    val_loss.backward()
+    torch.nn.utils.clip_grad_norm_(value.parameters(), .25)
     value_opt.step()
 
     # Save and intialize episode history counters
@@ -198,6 +248,7 @@ def update_reinforce(replay, policy, value, policy_opt, value_opt, gamma=.99):
     policy.reset()
     del policy.rewards[:]
     del policy.saved_log_probs[:]
+    return [policy_loss.item(), val_loss.item()]
 
 
 def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
@@ -232,14 +283,29 @@ def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
             global_iter+=1
 
 
-        update_reinforce(replay, policy, value, pol_opt, value_opt)
+        loss = update_reinforce(replay, policy, value, pol_opt, value_opt, i_episode)
 
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
         if train_logger is not None:
-            train_logger.add_scalar('average reward', running_reward, i_episode)
+            train_logger.add_scalar('average reward', np.mean(policy.reward_history[-100:]), i_episode)
+            train_logger.add_scalar('policy loss', loss[0], i_episode)
+            train_logger.add_scalar('value loss', loss[1], i_episode)
+
         if i_episode % checkpoint_step_size == 0:
             print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
                   i_episode, ep_reward, running_reward))
+            print('Checkpointing at batch {}'.format(i_episode))
+            print('Policy Loss: {}'.format(loss[0]))
+            print('Value Loss: {}'.format(loss[1]))
+
+            if checkpoint_filename is not None:
+                print('Saving policy to file {}'.format(checkpoint_filename))
+                torch.save(policy.state_dict(), checkpoint_filename)
+            if args.val_checkpoint_filename is not None:
+                print('Saving value network to file {}'.format(args.val_checkpoint_filename))
+                torch.save(value.state_dict(), args.val_checkpoint_filename)
+                print('Done checkpointing model')
+
         i_episode += 1
         if running_reward > .995:
             print("Solved! Running reward is now {} and "
@@ -451,18 +517,25 @@ def train_reinforce(args):
     policy = RobustFill(string_size=len(op.CHARACTER), 
         string_embedding_size=args.embedding_size, decoder_inp_size=128,
         hidden_size=args.hidden_size, 
-        program_size=len(token_tables.op_token_table),
+        program_size=len(token_tables.op_token_table), device=device
     )
-    if args.continue_training:
+    value = ValueNetwork(128, args.hidden_size).to(device)
+    if args.continue_training_policy:
         policy.load_state_dict(torch.load(
             path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
             map_location=device)
         )
+    elif args.continue_training:
+        policy.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=device)
+        )
+        value.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.val_checkpoint_filename),
+            map_location=device)
+        )
     policy = policy.to(device)
-    policy.set_device(device)
-
-    value = ValueNetwork(128, args.hidden_size).to(device)
-
+    value = value.to(device)
     # Initialize Optimizer
     if (args.optimizer == 'sgd'):
         pol_opt = optim.SGD(policy.parameters(), lr=args.lr)
@@ -507,6 +580,26 @@ def train_sac(args):
     tgt_q_1 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size).eval()
     tgt_q_2 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size).eval()
 
+
+    if args.continue_training_policy:
+        policy.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=device)
+        )
+    elif args.continue_training:
+        policy.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
+            map_location=device)
+        )
+        q_1.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.q1_checkpoint_filename),
+            map_location=device)
+        )
+        q_2.load_state_dict(torch.load(
+            path.join(path.dirname(path.abspath(__file__)), args.q2_checkpoint_filename),
+            map_location=device)
+        )
+
     for target_param, param in zip(tgt_q_1.parameters(), q_1.parameters()):
         target_param.data.copy_( param.data)
     for target_param, param in zip(tgt_q_2.parameters(), q_2.parameters()):
@@ -516,12 +609,12 @@ def train_sac(args):
     for param in tgt_q_2.parameters():
         param.requires_grad = False
 
-    if args.continue_training:
-        policy.load_state_dict(torch.load(
-            path.join(path.dirname(path.abspath(__file__)), args.checkpoint_filename),
-            map_location=device)
-        )
-
+    policy = policy.to(device)
+    q_1 = q_1.to(device)
+    q_2 = q_2.to(device)
+    tgt_q_1 = tgt_q_1.to(device)
+    tgt_q_2 = tgt_q_2.to(device)
+    
     # Initialize optimizers
     if (args.optimizer == 'sgd'):
         policy_opt = optim.SGD(policy.parameters(), lr=args.lr)
@@ -539,9 +632,9 @@ def train_sac(args):
     env = RobustFillEnv()
     replay_buffer_size = 1_000_000
     replay_buffer = Replay_Buffer(replay_buffer_size, args.batch_size)
-
+    her = HER()
     train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_2_opt, 
-        entropy_opt, replay_buffer, env, train_logger,
+        entropy_opt, replay_buffer, her, env, train_logger,
         args.checkpoint_filename, args.checkpoint_step_size, args.print_tensors
     )
 
@@ -563,7 +656,8 @@ def run_eval(args):
     eval(model, token_tables)
 
 
-def eval(model, token_tables, num_samples=200, beam_size=100, em=True):
+
+def eval(model, token_tables, num_samples=200, beam_size=10, em=True):
     model.eval()
     num_match = 0
     print("Evaluatng Examples...")
@@ -630,12 +724,18 @@ def run_sac(args):
 def main():
     parser = argparse.ArgumentParser(description='Train RobustFill.')
     parser.add_argument('-c', '--continue_training', action='store_true')
+    parser.add_argument('-cp', '--continue_training_policy', action='store_true')
     parser.add_argument('--log_dir')
     parser.add_argument('--lr', default=1e-3)
     parser.add_argument('--hidden_size', default=512)
     parser.add_argument('--batch_size', default=8)
     parser.add_argument('--embedding_size', default=64)
+
     parser.add_argument('--checkpoint_filename', default='./checkpoint.pth')
+    parser.add_argument('--val_checkpoint_filename', default='./val_checkpoint.pth')
+    parser.add_argument('--q1_checkpoint_filename', default='./q1_checkpoint.pth')
+    parser.add_argument('--q2_checkpoint_filename', default='./q2_checkpoint.pth')
+
     parser.add_argument('--checkpoint_step_size', default=8)
     parser.add_argument('--print_tensors', default=True)
     parser.add_argument('--optimizer', default='adam')
@@ -644,6 +744,7 @@ def main():
     parser.add_argument('--reinforce', action='store_true')
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--sac', action='store_true')
+    parser.add_argument('--her', action='store_true')
     args = parser.parse_args()
 
     torch.manual_seed(1337)

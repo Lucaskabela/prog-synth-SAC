@@ -5,14 +5,14 @@
 _A research project investigating applications of Actor Critic in Neural Program Synthesis_
 
 [Proposal](./writeups/project_proposal_final_program_synthesis.pdf)
-
+[Report](./writeups/nps_with_sac.pdf)
 ---
 
 ## References:
 This project is largely following the work of Robustfill by [Delvin et al. 17](https://arxiv.org/abs/1703.07469)
 
-DSL and base code was largerly derived from [here](https://github.com/yeoedward/Robust-Fill/)
-
+DSL and base model was largerly derived from [here](https://github.com/yeoedward/Robust-Fill/)
+SAC imlementation derived from [here](https://github.com/kengz/SLM-Lab)
 
 ## Getting Started
 
@@ -25,41 +25,54 @@ The following base packages were used to run this repository:
  - [PyTorch](https://pytorch.org/) - Lastest (1.2.0+)
 
 ### First Steps
-This repository contains code for running repeatable experiments with a tool for neural symbolic synthesis of x86 programs. 
+This repository contains code for training a model for neural program synthesis.  We provide 
+supervised learning and reinforcement learing algorithms REINFORCE and SAC.  To train a model, run
+
+    `python train.py [--sac] [--reinforce]`
+
+See train.py for more command line arguments related to hyperparameters.  Alternatively, we have provided
+a notebook, train.ipynb which requires the code in the src folder to run.  This code, with supervised 
+training from scratch should reach a loss of 4 within minutes, and below 2 in about 30 hours with hyperparameters
+provided
 
 ## Repository Structure
 
     .
-    ├── results                # Results of experiments
+    ├── model_zoo              # Pretrained models used to produce results
+    |
+    ├── results                # Results of experiments in csv
     |
     ├── src                    # source code for the project
     |
-    ├── writeups               # Project proposal and drafts
+    ├── writeups               # Project proposal and final report
     |
     ├── LICENSE
+    | 
     └── README.md
 
 
 ### Src
-Code for runnning the experiments	
+Contains the code required for training the models and running experiments, as well as 
+executable notebooks.
 
-### Results
-[Raw data from experiments]()
-
-### Writeup
-This folder contains proposal and reports on the experiments
-
-## License:
-This project is licensed under the terms of the MIT license.
-
-## Training in Colab:
-Note, this program has long training times.  To avoid disconnection from
+#### Training in Colab:
+Note, this program has long training times, so if you are running in colab, to avoid disconnection from
 inactivity and take advantage of full training time, please add the following
-to the console in your colab if training remotely:
+to the console:
 ```
 function ClickConnect(){
-	console.log("Clicking");
-	document.querySelector("colab-connect-button").click()
+    console.log("Clicking");
+    document.querySelector("colab-connect-button").click()
 }
 setInterval(ClickConnect,60000)
 ```
+
+### Results
+[Contains the raw data from experiments]()
+
+### Writeup
+This folder contains the project proposal and final report/writeup describing the 
+methodology, intuitions, related worksn and results.
+
+## License:
+This project is licensed under the terms of the MIT license.

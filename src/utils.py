@@ -321,6 +321,31 @@ class Replay_Buffer(object):
         return len(self.memory)
 
 
+class HER(object):
+
+    def __init__(self):
+        self.episode_history = deque()
+
+
+    def __len__(self):
+        return len(self.episode_history)
+
+    def add_experience(self, states, i_o, actions, rewards, next_states, dones):
+        self.episode_history.append((states, i_o, actions, rewards, next_states, dones))
+
+    def backward(self):
+        '''
+        Apply the hindsight - make end of episode state goal state, so change the reward to 1!
+        '''
+        # Can't really change the state here though...
+        self.episode_history[-1][-3] = 1
+        episodes_ret = copy.deepcopy(self.episode_history)
+        self.reset()
+        return episodes_ret
+
+    def reset(self):
+        self.episode_history = deque()
+
 # https://stackoverflow.com/questions/56226133/soft-actor-critic-with-discrete-action-space
 # ... for discrete action, GumbelSoftmax distribution
 class GumbelSoftmax(torch.distributions.RelaxedOneHotCategorical):
