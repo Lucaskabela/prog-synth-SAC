@@ -7,7 +7,7 @@ from collections import namedtuple, deque
 import logging
 import random
 import numpy as np
-
+import copy
 import dsl as op
 import torch
 import torch.nn.functional as F
@@ -338,7 +338,7 @@ class HER(object):
         return len(self.episode_history)
 
     def add_experience(self, states, i_o, actions, rewards, next_states, dones):
-        self.episode_history.append((states, i_o, actions, rewards, next_states, dones))
+        self.episode_history.append([states, i_o, actions, rewards, next_states, dones])
 
     def backward(self):
         '''

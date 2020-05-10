@@ -92,21 +92,22 @@ def train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_
         if i_episode % checkpoint_step_size == 0:
             print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
                   i_episode, ep_reward, running_reward))
-            print('Checkpointing at batch {}'.format(global_iter))
-            print('Policy Loss: {}'.format(loss[0]))
-            print('Q_1 Loss: {}'.format(loss[1]))
-            print('Q_2 Loss: {}'.format(loss[2]))
-            print('Entropy Loss: {}'.format(loss[3]))
+            print('Checkpointing at episode {}'.format(i_episode))
+            if loss is not None:
+                print('Policy Loss: {}'.format(loss[0]))
+                print('Q_1 Loss: {}'.format(loss[1]))
+                print('Q_2 Loss: {}'.format(loss[2]))
+                print('Entropy Loss: {}'.format(loss[3]))
 
             if checkpoint_filename is not None:
                 print('Saving policy to file {}'.format(checkpoint_filename))
                 torch.save(policy.state_dict(), args.checkpoint_filename)
-            if q1_checkpoint_filename is not None:
+            if args.q1_checkpoint_filename is not None:
                 print('Saving value network to file {}'.format(args.q1_checkpoint_filename))
-                torch.save(q1.state_dict(), args.q1_checkpoint_filename)
-            if q2_checkpoint_filename is not None:
+                torch.save(q_1.state_dict(), args.q1_checkpoint_filename)
+            if args.q2_checkpoint_filename is not None:
                 print('Saving value network to file {}'.format(args.q2_checkpoint_filename))
-                torch.save(q2.state_dict(), args.q2_checkpoint_filename)
+                torch.save(q_2.state_dict(), args.q2_checkpoint_filename)
             print('Done checkpointing model')
 
         i_episode += 1
@@ -141,7 +142,7 @@ def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt
     policy_opt.zero_grad()
 
     # Give q network's time to stableize
-    if i_episode > 250_000:
+    if (not args.continue_training_policy) or i_episode > 250_000:
         policy_loss.backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), .25)
         policy_opt.step()
@@ -273,7 +274,7 @@ def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
         if i_episode % checkpoint_step_size == 0:
             print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}'.format(
                   i_episode, ep_reward, running_reward))
-            print('Checkpointing at batch {}'.format(i_episode))
+            print('Checkpointing at episode {}'.format(i_episode))
             print('Policy Loss: {}'.format(loss[0]))
             print('Value Loss: {}'.format(loss[1]))
 
