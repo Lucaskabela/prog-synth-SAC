@@ -83,7 +83,7 @@ def train_sac_(args, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt, q_
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
         if train_logger is not None:
             train_logger.add_scalar('average reward', np.mean(policy.reward_history[-100:]), i_episode)
-            if loss is not None
+            if loss is not None:
                 train_logger.add_scalar('policy loss', loss[0], i_episode)
                 train_logger.add_scalar('q_1 loss', loss[1], i_episode)
                 train_logger.add_scalar('q_2 loss', loss[2], i_episode)
@@ -220,7 +220,7 @@ def calculate_entropy_tuning_loss(policy, log_pi):
     alpha_loss = -(policy.log_alpha * (log_pi.detach() + policy.target_entropy)).mean()
     return alpha_loss
 
-    
+
 def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
     checkpoint_filename, checkpoint_step_size, checkpoint_print_tensors):
     '''
