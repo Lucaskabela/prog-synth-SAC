@@ -1,6 +1,6 @@
 '''
-This file defines the utilities for interacting with the DSL
-and training models
+This file defines the utilities for creating sample programs from the DSL,
+Beam, HER, and ReplayBuffer as well
 '''
 
 from collections import namedtuple, deque
@@ -21,6 +21,10 @@ Example = namedtuple(
 )
 
 def sample(token_tables, max_expressions=3, max_characters=50):
+    '''
+    Samples a program and i/o examples using token_table and returns 
+    in the form (program, [(inputs, outputs)])
+    '''
     example = sample_example(max_expressions, max_characters)
     program = example.program.to_tokens(token_tables.op_token_table)
     strings = [
@@ -30,10 +34,12 @@ def sample(token_tables, max_expressions=3, max_characters=50):
     ]
     return (program, strings)
 
+
 def sample_example(max_expressions=10, max_characters=100, max_empty_strings=0,
         num_strings=4, discard_program_num_empty=100,
         discard_program_num_exceptions=100):
 
+    ''' Does the heavy lifting of sampling'''
     num_discarded = 0
     while True:
         program = sample_program(max_expressions)
@@ -189,7 +195,7 @@ def sample_GetAll():
     return op.GetAll(type_)
 
 
-
+# Beam from an undergraduate NLP course
 class Beam(object):
     """
     Beam data structure. Maintains a list of scored elements, but only keeps the top n
@@ -321,6 +327,7 @@ class Replay_Buffer(object):
         return len(self.memory)
 
 
+# Simple HER for this domain - actual goal will be last state
 class HER(object):
 
     def __init__(self):
