@@ -60,6 +60,9 @@ def main():
         help="Perform evaluation (requires continue_training and checkpoint_filename"
     )
     parser.add_argument('--beam_size', type=int, default=10, help="Beam size for decoder")
+    parser.add_argument('--consistency', default=False, action='store_true', 
+        help="Use consistency vs exact match when evaluating"
+    )
     parser.add_argument('--reinforce', action='store_true', help="Train with REINFORCE")
     parser.add_argument('--sac', action='store_true',  help="Train with SAC")
     parser.add_argument('--her', action='store_true', help="Train with SAC + HER")

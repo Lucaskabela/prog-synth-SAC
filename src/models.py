@@ -215,8 +215,8 @@ class RobustFill(nn.Module):
         '''
         action_probs, _, _ = self.next_probs(inp, hidden, 
             output_all_hidden)    
-        logits = F.log_softmax(action_probs.squeeze(0), dim=-1)
-        m = Categorical(logits=logits)
+        probs = F.softmax(action_probs.squeeze(0), dim=-1)
+        m = Categorical(probs=probs)
         action = m.sample()
         return action.cpu().squeeze()
 
@@ -226,8 +226,8 @@ class RobustFill(nn.Module):
         '''
         action_probs, out_all, hidden = self.next_probs(inp, hidden, 
             output_all_hidden)    
-        logits = F.log_softmax(action_probs.squeeze(0), dim=-1)
-        m = Categorical(logits=logits)
+        probs = F.softmax(action_probs.squeeze(0), dim=-1)
+        m = Categorical(probs=probs)
         action = m.sample()
         return action.cpu().squeeze(), m.log_prob(action), out_all, hidden
 
