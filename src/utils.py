@@ -3,14 +3,16 @@ This file defines the utilities for creating sample programs from the DSL,
 Beam, HER, and ReplayBuffer as well
 '''
 
-from collections import namedtuple, deque
-import logging
-import random
-import numpy as np
 import copy
 import dsl as op
+import logging
+import numpy as np
+import random
 import torch
 import torch.nn.functional as F
+
+from collections import namedtuple, deque
+
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel(logging.INFO)
@@ -19,6 +21,7 @@ Example = namedtuple(
     'Example',
     ['program', 'strings', 'num_discarded_programs'],
 )
+
 
 def sample(token_tables, max_expressions=3, max_characters=50):
     '''
@@ -76,6 +79,7 @@ def sample_example(max_expressions=10, max_characters=100, max_empty_strings=0,
                 LOGGER.debug(program)
                 num_discarded += 1
                 break
+
 
 def sample_string(max_characters):
     num_characters = random.randint(1, max_characters)
@@ -352,6 +356,7 @@ class HER(object):
 
     def reset(self):
         self.episode_history = deque()
+
 
 # https://stackoverflow.com/questions/56226133/soft-actor-critic-with-discrete-action-space
 # ... for discrete action, GumbelSoftmax distribution

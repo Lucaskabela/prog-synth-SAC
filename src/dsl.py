@@ -29,12 +29,14 @@ This file defines the DSL for this project
 
 -- See https://github.com/yeoedward/Robust-Fill/
 '''
+import re
+
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from enum import Enum
 from functools import reduce
 from string import printable, whitespace
-import re
+
 
 #########################################
 ######## ABSTRACT CLASS / DESIGN# #######

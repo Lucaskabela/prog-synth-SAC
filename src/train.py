@@ -1,18 +1,19 @@
+import copy
 import dsl as op
+import math
+import numpy as np
 import pprint as pp
 import random
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.tensorboard as tb
-import numpy as np
-import copy
-import math
 
 from env import to_program, RobustFillEnv, num_consistent
 from models import RobustFill, ValueNetwork, SoftQNetwork
-from utils import sample, sample_example, Beam, Replay_Buffer, HER
 from torch.utils.data import Dataset, DataLoader
+from utils import sample, sample_example, Beam, Replay_Buffer, HER
+
 
 def max_program_length(expected_programs):
     return max([len(program) for program in expected_programs])
@@ -142,7 +143,7 @@ def update(args, replay, policy, q_1, q_2, tgt_q_1, tgt_q_2, policy_opt, q_1_opt
     policy_opt.zero_grad()
 
     # Give q network's time to stableize
-    if (not args.continue_training_policy) or i_episode > 250_000:
+    if (not args.continue_training_policy) or i_episode > 50_000:
         policy_loss.backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), .25)
         policy_opt.step()
@@ -267,7 +268,7 @@ def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
         # Log metrics, and keep track of average performance
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
         if train_logger is not None:
-            train_logger.add_scalar('average reward', np.mean(policy.reward_history[-100:]), i_episode)
+            train_logger.add_scalar('average reward', np.mean(policy.reward_history[-100:]).item(), i_episode)
             train_logger.add_scalar('policy loss', loss[0], i_episode)
             train_logger.add_scalar('value loss', loss[1], i_episode)
 
@@ -306,7 +307,7 @@ def update_reinforce(replay, policy, value, policy_opt, value_opt, i_episode, ga
     returns = torch.tensor(returns).float().to(policy.device)
 
     # Convert data to proper format
-    states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device))
+    states = [policy.decoder_embedding(torch.LongTensor(state).to(policy.device)).detach()
         for state, _, _, _ in replay]
     i_os = [i_o for _, i_o, _, _ in replay]
 
@@ -324,7 +325,7 @@ def update_reinforce(replay, policy, value, policy_opt, value_opt, i_episode, ga
     policy_loss = torch.stack(policy_loss).sum()
 
     # Give value network time to stableize
-    if i_episode > 250_000:
+    if (not args.continue_training_policy) or i_episode > 50_000:
         policy_loss.backward()
         torch.nn.utils.clip_grad_norm_(policy.parameters(), .25)
         policy_opt.step()
@@ -447,6 +448,7 @@ def print_programs(expected_programs, tokens, train_logger, tok_op, global_iter)
     else:
         print("Actual parsed program:")
         print(prog)
+
 
 #----------------Data Loader, for Supervised---------------------------#
 class RobustFillDataset(Dataset):
@@ -610,7 +612,7 @@ def train_sac(args):
     policy = RobustFill(string_size=len(op.CHARACTER), 
         string_embedding_size=args.embedding_size, decoder_inp_size=128,
         hidden_size=args.hidden_size, 
-        program_size=len(token_tables.op_token_table),
+        program_size=len(token_tables.op_token_table), device=device
     )
     q_1 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size)
     q_2 = SoftQNetwork(128, len(token_tables.op_token_table), args.hidden_size)
@@ -648,6 +650,7 @@ def train_sac(args):
         param.requires_grad = False
 
     policy = policy.to(device)
+    policy.set_device(device)
     q_1 = q_1.to(device)
     q_2 = q_2.to(device)
     tgt_q_1 = tgt_q_1.to(device)
@@ -677,6 +680,7 @@ def train_sac(args):
         args.checkpoint_filename, args.checkpoint_step_size, args.print_tensors
     )
 
+
 #--------------------------Evaluation code--------------------------#
 def run_eval(args):
     '''
@@ -698,7 +702,6 @@ def run_eval(args):
     eval(model, token_tables, num_samples=1000, beam_size=args.beam_size, em=(not args.consistency))
 
 
-
 def eval(model, token_tables, num_samples=100, beam_size=10, em=True, num_examples=4):
     '''
     Evaluates the "goodness" of model on num_samples and reports the number which satisfied
@@ -709,7 +712,7 @@ def eval(model, token_tables, num_samples=100, beam_size=10, em=True, num_exampl
     model.eval()
     num_match = 0
     print("Evaluatng Examples...")
-
+    num_in_beams_consistent = [0] * (beam_size + 1)
     for idx in range(num_samples):
         if (idx % 10 == 0):
             print("On example {}".format(idx))
@@ -754,15 +757,23 @@ def eval(model, token_tables, num_samples=100, beam_size=10, em=True, num_exampl
             iteration+=1
 
         # Evaluate this beam!
+        this_beam = 0
+        matched = False
         for sequence, _ in res_beam.get_elts_and_scores():
             sequence = sequence[1:]
-            if (sequence == expected_programs):
+            if (em and sequence == expected_programs):
                 num_match+=1
                 break
             elif not em:
-                if (num_consistent((expected_programs, examples), actual_programs) == num_examples):
-                    num_match+=1
-                    break
+                expected_in = copy.deepcopy(expected_programs)
+                if (num_consistent((expected_in, examples), sequence, token_tables) == num_examples):
+                    if (not matched):
+                        num_match+=1
+                        matched = True
+                    this_beam += 1
+        num_in_beams_consistent[this_beam] += 1
+
+    print("Number of beams with [index] many consistent programs in the beam:")
+    print(num_in_beams_consistent)
 
     print('{}\% Accuracy!'.format((num_match/num_samples) * 100))
-

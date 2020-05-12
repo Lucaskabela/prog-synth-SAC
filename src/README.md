@@ -3,7 +3,7 @@
 This file contains source code required to run this project.  There are currently 4 "modes" of execution, 
 3 of which are training, and 1 of which is evaluation.  These modes are:
 	
-	- --eval, evaluates a trained model (requires -c and --checkpoint file)
+	- --eval, evaluates a trained model (requires -c and --checkpoint_filename)
 
 	- --reinforce, uses REINFORCE to train a model
 

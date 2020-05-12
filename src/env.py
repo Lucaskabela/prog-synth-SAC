@@ -17,7 +17,9 @@ This file defines the environemnt for the MDP, (S, A, R) where:
 Note, the interface for the environment follows the gym environment.
 '''
 import dsl as op
+
 from utils import sample_example
+
 
 # TODO: Extend Gym interface
 class RobustFillEnv():
@@ -62,7 +64,7 @@ class RobustFillEnv():
             if (self.reference_prog[0] == self.user_prog):
                 reward = 1
                 self.correct += 1
-            elif(num_consistent(self.reference_prog[0], self.user_prog, self.token_tables) == self.num_examples):
+            elif(num_consistent(self.reference_prog, self.user_prog, self.token_tables) == self.num_examples):
                 reward = 1
                 self.correct += 1
             old_prog = self.reference_prog[0]
@@ -154,10 +156,8 @@ def to_program(tokens, token_op_table):
         if (sub_progs[-1] == 'EOS'):
             del sub_progs[-1]
             break
-        elif (type(sub_progs[-1]) == int or type(sub_progs[-1]) == str):
-            # Need operators in top level only (no strings or chars)
-            raise Exception
     return op.Concat(*sub_progs)
+
 
 def op_to_prog(tokens, token_op_table):
     '''
@@ -184,8 +184,6 @@ def op_to_prog(tokens, token_op_table):
             res = curr_op(arg1, arg2)
         elif (curr_token == 3): # Constant string, so get next arg (better be a string!!)
             arg1 = token_op_table[tokens.pop(0)]
-            if (type(arg1) != str):
-                raise Exception
             arg1 = arg1 if arg1 != 'EOS' else ''
             res = curr_op(arg1)
         elif (curr_token == 4): # Get Substring, so get next two args (better be ints)
@@ -193,14 +191,10 @@ def op_to_prog(tokens, token_op_table):
             arg2 = token_op_table[tokens.pop(0)]
             arg1 = arg1 if arg1 != 'EOS' else ''
             arg2 = arg2 if arg2 != 'EOS' else ''
-            if (type(arg1) != int or type(arg2) != int):
-                raise Exception
             res = curr_op(arg1, arg2)
         elif (curr_token == 5): # GetSpan, pop next 6 arguments
             args = [token_op_table[tokens.pop(0)] for _ in range(6)]
             args = [arg if arg != 'EOS' else '' for arg in args]
-            if (type(args[1]) != int or type(arg[4]) != int): # Need these to be indices
-                raise Exception
             res = curr_op(*args)
         else: # After the first 5, we just have enumerated, so simply put them in the output
             ops = None
