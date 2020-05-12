@@ -263,7 +263,7 @@ def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
             global_iter+=1
 
         # perform an update!
-        loss = update_reinforce(replay, policy, value, pol_opt, value_opt, i_episode)
+        loss = update_reinforce(args, replay, policy, value, pol_opt, value_opt, i_episode)
 
         # Log metrics, and keep track of average performance
         running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
@@ -293,7 +293,7 @@ def train_reinforce_(args, policy, value, pol_opt, value_opt, env, train_logger,
             break
 
 
-def update_reinforce(replay, policy, value, policy_opt, value_opt, i_episode, gamma=.99):
+def update_reinforce(args, replay, policy, value, policy_opt, value_opt, i_episode, gamma=.99):
     '''
     Performs the update for reinforce by calculating trajectory return, value network
     predictions, then using log probs

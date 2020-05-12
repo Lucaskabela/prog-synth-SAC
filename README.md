@@ -4,14 +4,14 @@
 
 _A research project investigating applications of Soft Actor Critic in Neural Program Synthesis_
 
-[Proposal](./writeups/project_proposal_final_program_synthesis.pdf)
-[Report](./writeups/nps_with_sac.pdf)
+[Final Writeup](./writeups/nps_with_sac.pdf)
 ---
 
 ## References:
 This project is largely following the work of Robustfill by [Delvin et al. 17](https://arxiv.org/abs/1703.07469)
 
 DSL and base model was largerly derived from [here](https://github.com/yeoedward/Robust-Fill/)
+
 SAC imlementation derived from [here](https://github.com/kengz/SLM-Lab)
 
 ## Getting Started
@@ -26,9 +26,7 @@ The following base packages were used to run this repository:
 ### First Steps
 This repository contains code for training a model for neural program synthesis.  We provide 
 supervised learning and reinforcement learing algorithms REINFORCE and SAC.  To train a model, run
-
     ` python train.py [--sac] [--reinforce] `
-
 and to evaluate 
     ` python train.py  --eval -c --checkpoint_filename [policy to evaluate]`
 
