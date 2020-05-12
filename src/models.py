@@ -5,14 +5,16 @@ This file defines the models for the project - largely based off
 Not the most efficent implementation, but upon trying to rewrite, I failed to reach the same
 loss, so reverted to this verion with modifications.
 '''
-from torch.nn.utils.rnn import pack_sequence, pad_sequence, pack_padded_sequence, pad_packed_sequence
+import numpy as np
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import random
+
 from torch.distributions.categorical import Categorical
+from torch.nn.utils.rnn import pack_sequence, pad_sequence, pack_padded_sequence, pad_packed_sequence
 from utils import GumbelSoftmax
-import numpy as np
+
 
 class ValueNetwork(nn.Module):
     '''
@@ -40,6 +42,7 @@ class ValueNetwork(nn.Module):
 
         NOTE: embedded_seq is a list of tensors, where the list is batch size large.
         '''
+        hidden = (hidden[0].detach(), hidden[1].detach()) # Remove policy network gradients
         _, hidden_out = self.seq_encoder(embedded_seq, hidden)
         hidden_state = hidden_out[0] 
         x = F.relu(self.dropout(self.linear1(hidden_state)))
@@ -74,11 +77,13 @@ class SoftQNetwork(nn.Module):
 
         NOTE: embedded_seq is a list of tensors, where the list is batch size large.
         '''
+        hidden = (hidden[0].detach(), hidden[1].detach()) # Remove policy network gradients
         _, hidden = self.seq_encoder(embedded_seq, hidden)
         hidden_state = torch.cat([hidden[0].squeeze(0), action], -1)
         x = F.relu(self.dropout(self.linear1(hidden_state)))
         x = self.linear2(x)
         return x.view(-1)
+
 
 class RobustFill(nn.Module):
     '''
@@ -294,6 +299,7 @@ class RobustFill(nn.Module):
         
 
         return torch.cat(program_sequence)
+
 
 class ProgramDecoder(nn.Module):
     '''

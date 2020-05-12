@@ -2,8 +2,9 @@
 '''
 This file defines the primary driver for the experiments, as well as the arg parser
 '''
-from train import train_reinforce, train_supervised, train_sac, run_eval
 import argparse
+
+from train import train_reinforce, train_supervised, train_sac, run_eval
 
 
 def main():
@@ -78,6 +79,7 @@ def main():
         train_sac(args)
     else:
         train_supervised(args)
+
 
 if __name__ == '__main__':
     main()

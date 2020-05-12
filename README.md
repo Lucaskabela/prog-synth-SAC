@@ -2,16 +2,16 @@
 
 **Lucas Kabela**
 
-_A research project investigating applications of Actor Critic in Neural Program Synthesis_
+_A research project investigating applications of Soft Actor Critic in Neural Program Synthesis_
 
-[Proposal](./writeups/project_proposal_final_program_synthesis.pdf)
-[Report](./writeups/nps_with_sac.pdf)
+[Final Writeup](./writeups/nps_with_sac.pdf)
 ---
 
 ## References:
 This project is largely following the work of Robustfill by [Delvin et al. 17](https://arxiv.org/abs/1703.07469)
 
 DSL and base model was largerly derived from [here](https://github.com/yeoedward/Robust-Fill/)
+
 SAC imlementation derived from [here](https://github.com/kengz/SLM-Lab)
 
 ## Getting Started
@@ -20,15 +20,15 @@ SAC imlementation derived from [here](https://github.com/kengz/SLM-Lab)
 The following base packages were used to run this repository: 
 
  - [Python](https://www.python.org/) - 3.6+
- - [Gym](https://gym.openai.com/) - 0.15.4+
  - [Numpy](https://numpy.org/) - 1.16.4+
  - [PyTorch](https://pytorch.org/) - Lastest (1.2.0+)
 
 ### First Steps
 This repository contains code for training a model for neural program synthesis.  We provide 
 supervised learning and reinforcement learing algorithms REINFORCE and SAC.  To train a model, run
-
-    `python train.py [--sac] [--reinforce]`
+    ` python train.py [--sac] [--reinforce] `
+and to evaluate 
+    ` python train.py  --eval -c --checkpoint_filename [policy to evaluate]`
 
 See train.py for more command line arguments related to hyperparameters.  Alternatively, we have provided
 a notebook, train.ipynb which requires the code in the src folder to run.  This code, with supervised 
@@ -68,11 +68,11 @@ setInterval(ClickConnect,60000)
 ```
 
 ### Results
-[Contains the raw data from experiments]()
+[Contains the raw data from experiments](./results/NPS_with_SAC_data.csv)
 
 ### Writeup
 This folder contains the project proposal and final report/writeup describing the 
-methodology, intuitions, related worksn and results.
+methodology, intuitions, related works and results.
 
 ## License:
 This project is licensed under the terms of the MIT license.
